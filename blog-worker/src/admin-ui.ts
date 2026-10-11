@@ -1482,36 +1482,43 @@ function aiBubbleHtml(role, content, idx, m){
     acts +
   '</div>';
 }
-// ===== AI 聊天自动滚动（简洁实现）=====
-// 规则：是否跟随 = 用户当前是否停在底部附近。
-// 关键点：只把「用户自己产生的 scroll 事件」当作判断依据，程序化贴底产生的 scroll 事件直接忽略，
-// 这样即使贴底晚了一帧、没完全到底，也不会被误判成「用户上滑」而永久停止跟随。
+// ===== AI 聊天自动滚动 =====
+// 规则：
+// 1) 只要用户停在底部附近（≤AI_NEAR px），任何内容变化都直接贴到底——「在底部 = 跟随」永远自愈；
+// 2) 只有用户明确的「向上操作」（滚轮上滑/手指上划/键盘上键/拖滚动条远离底部）才停止跟随；
+// 3) 普通 scroll 事件（含程序化贴底、innerHTML 重建、内容增减导致的浏览器回弹）只允许
+//    「恢复跟随」，绝不允许停止跟随——避免一次误判就永久卡死。
 const AI_NEAR = 64;                 // 距底部多少 px 内算「在底部」
 let aiStick = true;                 // 是否跟随最新内容
-let aiPinning = false;              // 本次 scroll 事件是否由我们程序化贴底触发
+let aiDragging = false, aiDragT = 0; // 正在拖动滚动条（拖离底部时才停止跟随）
+let aiTouchY = null;                // 触摸起点 Y
 // 生成中过程行的实时状态文字（流式阶段用；工具执行阶段为空，回退到按消息推断）
 let aiLivePhase = '';
 function aiScroller(){ return $('#aiMessages'); }
 // 距底部的剩余距离
 function aiBottomGap(box){ const b = box || aiScroller(); if(!b) return 0; return b.scrollHeight - b.scrollTop - b.clientHeight; }
 function aiNearBottom(box){ return aiBottomGap(box) <= AI_NEAR; }
-// 直接贴到底部；位置确实变化时才标记 aiPinning（该标记由随后的 scroll 事件消费）
+// 直接贴到底部
 function aiPinBottom(box){
   const b = box || aiScroller(); if(!b) return;
-  if(b.scrollTop < b.scrollHeight - b.clientHeight) aiPinning = true;
   try{ b.scrollTop = b.scrollHeight; }catch(e){}
 }
-// 内容/渲染变化后调用：跟随则贴底，并做几次延迟兜底（图片、代码块、字体异步撑高）
+// 核心：在底部附近 → 恢复跟随并贴底；跟随中 → 贴底。任何内容变化后调用。
+function aiFollowOrPin(){
+  const box = aiScroller(); if(!box) return;
+  if(aiNearBottom(box)) aiStick = true;
+  if(aiStick) aiPinBottom(box);
+}
+// 内容/渲染变化后调用：贴底并做几次延迟兜底（图片、代码块、字体异步撑高）
 function scrollAiBottom(){
   aiEnsureColObserver();
-  if(!aiStick) return;
-  aiPinBottom();
+  aiFollowOrPin();
   if(scrollAiBottom._raf) cancelAnimationFrame(scrollAiBottom._raf);
-  scrollAiBottom._raf = requestAnimationFrame(function(){ if(aiStick) aiPinBottom(); });
+  scrollAiBottom._raf = requestAnimationFrame(aiFollowOrPin);
   clearTimeout(scrollAiBottom._t);
-  scrollAiBottom._t = setTimeout(function(){ if(aiStick) aiPinBottom(); }, 150);
+  scrollAiBottom._t = setTimeout(aiFollowOrPin, 150);
 }
-// 绑定滚动/尺寸/DOM 监听：用户滚动决定是否跟随；内容变化时即时贴底
+// 绑定滚动/尺寸/DOM 监听
 let aiColObserver = null, aiDomObserver = null, aiBoundBox = null, aiObservedCol = null;
 function aiEnsureColObserver(){
   const col = $('#aiCol'), box = aiScroller();
@@ -1519,21 +1526,47 @@ function aiEnsureColObserver(){
   // 容器可能被重建（切页/全屏），元素变了就重新绑定
   if(box !== aiBoundBox){
     aiBoundBox = box;
+    // scroll：回到底部附近 → 恢复跟随；拖滚动条远离底部 → 停止跟随；其余一律不改变状态
     box.addEventListener('scroll', function(){
-      if(aiPinning){ aiPinning = false; aiStick = true; return; } // 忽略自己贴底产生的滚动
-      aiStick = aiNearBottom(box);                                // 用户滚动：按当前位置决定是否跟随
+      if(aiNearBottom(box)) aiStick = true;
+      else if(aiDragging) aiStick = false;
     }, { passive:true });
+    // 滚轮上滑 = 想看历史：立即停止跟随（若其实仍在底部附近，下一次内容变化会自动恢复）
+    box.addEventListener('wheel', function(e){
+      if(e.deltaY < 0) aiStick = false;
+    }, { passive:true });
+    // 手指向下划（浏览更早内容）：停止跟随
+    box.addEventListener('touchstart', function(e){
+      aiTouchY = (e.touches && e.touches[0]) ? e.touches[0].clientY : null;
+    }, { passive:true });
+    box.addEventListener('touchmove', function(e){
+      const y = (e.touches && e.touches[0]) ? e.touches[0].clientY : null;
+      if(y != null && aiTouchY != null && y > aiTouchY) aiStick = false;
+      aiTouchY = y;
+    }, { passive:true });
+    // 键盘上翻：停止跟随
+    box.addEventListener('keydown', function(e){
+      if(e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') aiStick = false;
+    });
+    // 拖动滚动条期间按位置判断（拖离底部 → 停止；拖回底部 → 恢复）
+    box.addEventListener('pointerdown', function(){ aiDragging = true; clearTimeout(aiDragT); }, { passive:true });
+    ['pointerup','pointercancel'].forEach(function(ev){
+      box.addEventListener(ev, function(){
+        clearTimeout(aiDragT);
+        aiDragT = setTimeout(function(){ aiDragging = false; }, 500); // 覆盖拖动结束后的惯性滚动
+      }, { passive:true });
+    });
   }
   if(col !== aiObservedCol){
     aiObservedCol = col;
     try{
       if(aiColObserver) aiColObserver.disconnect();
-      aiColObserver = new ResizeObserver(function(){ if(aiStick) aiPinBottom(); });
+      aiColObserver = new ResizeObserver(aiFollowOrPin);
       aiColObserver.observe(col);
     }catch(e){}
     try{
       if(aiDomObserver) aiDomObserver.disconnect();
-      aiDomObserver = new MutationObserver(function(){ if(aiStick) aiPinBottom(); });
+      aiDomObserver = new MutationObserver(aiFollowOrPin);
       aiDomObserver.observe(col, { childList:true, subtree:true, characterData:true, attributes:true });
     }catch(e){}
   }
