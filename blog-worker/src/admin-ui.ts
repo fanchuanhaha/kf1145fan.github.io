@@ -205,7 +205,7 @@ a{color:var(--accent);text-decoration:none}
 .ai-col{max-width:748px;width:100%;margin:0 auto;padding:18px 16px;display:flex;flex-direction:column;gap:16px}
 .ai-msg{display:flex;flex-direction:column;gap:4px;min-width:0}
 .ai-msg.user{align-items:flex-end}
-.ai-msg.assistant{align-items:stretch;position:relative}
+.ai-msg.assistant{align-items:stretch}
 .ai-who{font-size:11px;color:var(--muted)}
 /* 正文严格限制在气泡内换行：长链接/长串也不会顶出左右两边 */
 .ai-body{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-width:100%;line-height:1.7;font-size:14px;border-radius:2px}
@@ -256,8 +256,6 @@ a{color:var(--accent);text-decoration:none}
 .ai-tool-fold-sec{margin:0 0 6px}
 .ai-tool-fold-pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;line-height:1.6;max-height:240px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px}
 .ai-tool-fold-pre.err{color:#d9534f}
-/* 等待模型响应：绝对定位、不占文档流高度——出现/隐藏都不会改变气泡高度，输出底部不会上下跳 */
-.ai-wait{position:absolute;left:0;top:100%;font-size:12.5px;line-height:1.4;color:var(--muted);padding:0;white-space:nowrap;pointer-events:none}
 /* 输入区上方一行的「i」按钮：查看已用 token / 缓存命中 */
 #aiUsageBtn{margin-left:auto;flex:0 0 auto;width:26px;height:26px;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;line-height:1}
 .ai-usage-pop{position:fixed;z-index:1200;background:var(--card);border:1px solid var(--border);border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:10px 12px;min-width:190px;font-size:12px}
@@ -1622,14 +1620,12 @@ async function aiAgentLoop(){
       const lastRound = rounds >= AI_MAX_ROUNDS;
       renderAiMessages();
       const box = $('#aiCol');
-      // 生成中的临时气泡：不显示「AI」标签；首个输出片段到达前先显示「等待模型响应」
+      // 生成中的临时气泡：不显示「AI」标签
       if(box) box.insertAdjacentHTML('beforeend', '<div class="ai-msg assistant">'+
-        '<div class="ai-body md" id="aiCurBody"></div>'+
-        '<div class="ai-wait" id="aiCurWait">等待模型响应…</div></div>');
+        '<div class="ai-body md" id="aiCurBody"></div></div>');
       scrollAiBottom();
       const bodyEl = box ? box.querySelector('#aiCurBody') : null;
-      const waitEl = box ? box.querySelector('#aiCurWait') : null;
-      const ui = { bodyEl: bodyEl, waitEl: waitEl, acc: '', procKey: aiLiveTurnKey() };
+      const ui = { bodyEl: bodyEl, acc: '', procKey: aiLiveTurnKey() };
       let res;
       try{
         res = await aiStreamRound(modelName, ui, lastRound);
@@ -1645,7 +1641,7 @@ async function aiAgentLoop(){
         const hint = aiChatProxyOn() ? '（前端代理请求失败：服务商可能不允许跨域）' : '';
         if(msg){ msg.className = 'msg err'; msg.textContent = '请求失败：' + err + hint; }
         toast('请求失败：' + err, true);
-        // 保留已收到的部分内容（草稿转正），并清掉临时气泡（否则会残留「等待模型响应」）
+        // 保留已收到的部分内容（草稿转正），并清掉临时气泡
         if(ui.acc){ if(!aiFinalizeDraft(ui.acc)) aiConvMessages.push({ role:'assistant', content: ui.acc }); }
         finished = true;
         break;
@@ -1772,11 +1768,10 @@ async function aiStreamRound(modelName, ui, noTools){
   const dec = new TextDecoder();
   let buf = '', acc = '', reasonAcc = '', lastPaint = 0, usageAcc = null;
   const toolAcc = {};
-  // 首个输出片段到达：撤掉「等待模型响应」，记录首字延迟并实时反映到「i」面板
+  // 首个输出片段到达：记录首字延迟并实时反映到「i」面板
   const markFirst = function(){
     if(ttft !== null) return;
     ttft = Date.now() - t0;
-    if(ui && ui.waitEl) ui.waitEl.style.display = 'none';
     aiPerfPending = { ttft: ttft };
     aiUpdateUsagePop();
   };
@@ -1806,14 +1801,12 @@ async function aiStreamRound(modelName, ui, noTools){
           reasonAcc += rc;
           markFirst();
           aiLivePhase = '思考中…';
-          if(ui && ui.waitEl && ui.waitEl.style.display !== 'none') ui.waitEl.textContent = '思考中…';
         }
       }
       if(delta.content){
         acc += delta.content;
         markFirst();
         aiLivePhase = '正在生成回答…';
-        if(ui && ui.waitEl && ui.waitEl.style.display !== 'none'){ ui.waitEl.style.display = 'none'; scrollAiBottom(); }
         // AI 开始输出回答：把本轮的过程块自动收起一次（本轮还没调用工具，说明这就是最终回答）；
         // 只收一次，避免用户之后手动展开时又被收回去
         if(!Object.keys(toolAcc).length && ui && !ui.procCollapsed){ ui.procCollapsed = true; aiSetProcOpen(ui.procKey, false); }
@@ -1827,7 +1820,6 @@ async function aiStreamRound(modelName, ui, noTools){
       if(delta.tool_calls && delta.tool_calls.length){
         markFirst();
         aiLivePhase = '准备调用工具…';
-        if(ui && ui.waitEl && ui.waitEl.style.display !== 'none') ui.waitEl.textContent = '准备调用工具…';
         // 有工具调用：重新展开过程块，实时看到这次调用了什么
         aiSetProcOpen(ui && ui.procKey, true);
         for(let ti=0; ti<delta.tool_calls.length; ti++){
@@ -1850,7 +1842,6 @@ async function aiStreamRound(modelName, ui, noTools){
   }).filter(function(t){ return !!t.name; });
   // 收尾：把流式内容按 Markdown 完整渲染一次
   if(ui && ui.bodyEl) ui.bodyEl.innerHTML = renderMd(acc);
-  if(ui && ui.waitEl) ui.waitEl.style.display = 'none';
   aiLivePhase = ''; // 流式阶段结束，过程行状态改由消息推断（如「正在调用 xxx…」）
   scrollAiBottom();
   // out：本轮的输出 token 数（取上游 usage），用于折算平均 token 速度
