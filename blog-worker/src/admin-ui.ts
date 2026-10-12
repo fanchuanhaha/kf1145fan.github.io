@@ -1488,18 +1488,26 @@ function aiBubbleHtml(role, content, idx, m){
 //    「恢复跟随」，绝不允许停止跟随——避免一次误判就永久卡死。
 const AI_NEAR = 64;                 // 距底部多少 px 内算「在底部」
 let aiStick = true;                 // 是否跟随最新内容
+let aiPinning = false;              // 本次 scroll 事件是否由程序化贴底产生（要忽略，防止误判用户上滑）
 let aiDragging = false, aiDragT = 0; // 正在拖动滚动条（拖离底部时才停止跟随）
 let aiTouchY = null;                // 触摸起点 Y
+let aiBeat = null;                  // 流式期间的心跳，保证任何情况下都在跟随
 // 生成中过程行的实时状态文字（流式阶段用；工具执行阶段为空，回退到按消息推断）
 let aiLivePhase = '';
 function aiScroller(){ return $('#aiMessages'); }
 // 距底部的剩余距离
 function aiBottomGap(box){ const b = box || aiScroller(); if(!b) return 0; return b.scrollHeight - b.scrollTop - b.clientHeight; }
 function aiNearBottom(box){ return aiBottomGap(box) <= AI_NEAR; }
-// 直接贴到底部
+// 直接贴到底部；位置确实变化时标记 aiPinning（由随后的 scroll 事件消费并忽略）
 function aiPinBottom(box){
   const b = box || aiScroller(); if(!b) return;
-  try{ b.scrollTop = b.scrollHeight; }catch(e){}
+  const max = b.scrollHeight - b.clientHeight;
+  if(max > 0 && b.scrollTop < max){
+    aiPinning = true;
+    clearTimeout(aiPinBottom._r);
+    aiPinBottom._r = setTimeout(function(){ aiPinning = false; }, 150); // 防止标记悬挂
+    try{ b.scrollTop = b.scrollHeight; }catch(e){}
+  }
 }
 // 核心：在底部附近 → 恢复跟随并贴底；跟随中 → 贴底。任何内容变化后调用。
 function aiFollowOrPin(){
@@ -1531,22 +1539,27 @@ function aiEnsureColObserver(){
       aiScrollRO = new ResizeObserver(function(){ aiFollowOrPin(); });
       aiScrollRO.observe(box);
     }catch(e){}
-    // scroll：回到底部附近 → 恢复跟随；拖滚动条远离底部 → 停止跟随；其余一律不改变状态
+    // scroll：先忽略自己贴底产生的滚动，再判断——
+    // 回到底部附近 → 恢复跟随；用户拖滚动条远离底部 → 停止跟随；其余不改变状态
     box.addEventListener('scroll', function(){
+      if(aiPinning){ aiPinning = false; return; }
       if(aiNearBottom(box)) aiStick = true;
       else if(aiDragging) aiStick = false;
     }, { passive:true });
-    // 滚轮上滑 = 想看历史：立即停止跟随（若其实仍在底部附近，下一次内容变化会自动恢复）
+    // 滚轮上滑 = 想看历史：仅当真的处于已下滚状态（上方还有内容可看）才停止跟随，
+    // 防止内容不足一屏或已在顶部时的空滚误关跟随
     box.addEventListener('wheel', function(e){
-      if(e.deltaY < 0) aiStick = false;
+      if(e.deltaY < 0 && box.scrollTop > 4) aiStick = false;
     }, { passive:true });
-    // 手指向下划（浏览更早内容）：停止跟随
+    // 手指向下划（浏览更早内容）：停止跟随。
+    // 必须是「明确的上滑手势」：位移超过 6px 且当前确实已下滚过，否则点按/收键盘的轻微
+    // 触碰就会被误判成往回看，导致后面再也不跟随（手机上高发）
     box.addEventListener('touchstart', function(e){
       aiTouchY = (e.touches && e.touches[0]) ? e.touches[0].clientY : null;
     }, { passive:true });
     box.addEventListener('touchmove', function(e){
       const y = (e.touches && e.touches[0]) ? e.touches[0].clientY : null;
-      if(y != null && aiTouchY != null && y > aiTouchY) aiStick = false;
+      if(y != null && aiTouchY != null && y - aiTouchY > 6 && box.scrollTop > 4) aiStick = false;
       aiTouchY = y;
     }, { passive:true });
     // 键盘上翻：停止跟随
@@ -1617,6 +1630,10 @@ async function aiAgentLoop(){
   const modelName = modelEl ? modelEl.value.trim() : '';
   aiStreaming = true;
   aiSetSendState(true);
+  // 流式期间心跳兜底：无论哪个环节漏了触发贴底（工具执行、思考间隙、事件竞态），只要用户
+  // 没有主动上滑看历史，都保证持续跟随到最新输出
+  clearInterval(aiBeat);
+  aiBeat = setInterval(function(){ if(aiStreaming) aiFollowOrPin(); else clearInterval(aiBeat); }, 700);
   const msg = $('#aiChatMsg'); if(msg){ msg.className = 'msg'; msg.textContent = ''; }
   aiAbort = new AbortController();
   let rounds = 0, finished = false;
@@ -1710,6 +1727,7 @@ async function aiAgentLoop(){
     }
   }finally{
     aiStreaming = false; aiAbort = null; aiUsagePending = null; aiPerfPending = null; aiLivePhase = '';
+    clearInterval(aiBeat);
     aiSetSendState(false);
     aiUpdateUsagePop();
     // 生成结束（非中断/异常）后重渲染一次：恢复「AI」标签与「复制」按钮
