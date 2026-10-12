@@ -202,7 +202,7 @@ a{color:var(--accent);text-decoration:none}
 .ai-main{flex:1;display:flex;flex-direction:column;min-width:0}
 .ai-bar{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;min-width:0}
 .ai-scroll{flex:1;overflow:auto;min-height:0;overflow-anchor:none}
-.ai-col{max-width:748px;width:100%;margin:0 auto;padding:18px 16px;display:flex;flex-direction:column;gap:16px}
+.ai-col{max-width:748px;width:100%;margin:0 auto;padding:18px 16px 4px;display:flex;flex-direction:column;gap:16px}
 .ai-msg{display:flex;flex-direction:column;gap:4px;min-width:0}
 .ai-msg.user{align-items:flex-end}
 .ai-msg.assistant{align-items:stretch}
@@ -1517,13 +1517,20 @@ function scrollAiBottom(){
   scrollAiBottom._t = setTimeout(aiFollowOrPin, 150);
 }
 // 绑定滚动/尺寸/DOM 监听
-let aiColObserver = null, aiDomObserver = null, aiBoundBox = null, aiObservedCol = null;
+let aiColObserver = null, aiDomObserver = null, aiScrollRO = null, aiBoundBox = null, aiObservedCol = null;
 function aiEnsureColObserver(){
   const col = $('#aiCol'), box = aiScroller();
   if(!col || !box) return;
   // 容器可能被重建（切页/全屏），元素变了就重新绑定
   if(box !== aiBoundBox){
     aiBoundBox = box;
+    try{
+      if(aiScrollRO) aiScrollRO.disconnect();
+      // 滚动区自身尺寸变化（下方「继续」条/状态行出现把滚动区压矮、面板布局变化等）
+      // 也必须重新贴底——之前只监听内容区，这种压缩没人管，导致「明明贴了底却被顶上去」
+      aiScrollRO = new ResizeObserver(function(){ aiFollowOrPin(); });
+      aiScrollRO.observe(box);
+    }catch(e){}
     // scroll：回到底部附近 → 恢复跟随；拖滚动条远离底部 → 停止跟随；其余一律不改变状态
     box.addEventListener('scroll', function(){
       if(aiNearBottom(box)) aiStick = true;
