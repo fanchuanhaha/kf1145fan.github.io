@@ -1188,14 +1188,8 @@ function aiSetProcOpen(key, open){
   const d = document.querySelector('.ai-proc[data-k="' + key + '"]');
   if(d){ d.open = open; scrollAiBottom(); } // 展开/收起过程块会改变高度，跟随状态下立即贴回底部
 }
-// 当前正在生成的一轮对应的过程块 key（= 该轮第一条消息的下标）
-function aiLiveTurnKey(){
-  let start = 0;
-  for(let i = aiConvMessages.length - 1; i >= 0; i--){
-    if((aiConvMessages[i] || {}).role === 'user'){ start = i + 1; break; }
-  }
-  return 'proc-' + start;
-}
+// 注意：不能用「最后一条用户消息的下标+1」作为流式轮的 proc key——那样同一个回合里的
+// 多轮工具调用会与已完成轮次的 proc 撞号，导致流式中途误开关上方轮次的过程块
 function renderAiMessages(){
   const box = $('#aiCol'); if(!box) return;
   // 记录当前滚动位置：用户上滑阅读时，重渲染后要保持在原处（工具调用/流式渲染时尤其容易跳）
@@ -1489,7 +1483,7 @@ function aiBubbleHtml(role, content, idx, m){
 const AI_NEAR = 64;                 // 距底部多少 px 内算「在底部」
 let aiStick = true;                 // 是否跟随最新内容
 let aiPinning = false;              // 本次 scroll 事件是否由程序化贴底产生（要忽略，防止误判用户上滑）
-let aiDragging = false, aiDragT = 0; // 正在拖动滚动条（拖离底部时才停止跟随）
+let aiPointerDown = false;          // 指针/手指是否仍按住（拖滚动条时拖离底部才停跟随；松开后的惯性滚动不算）
 let aiTouchY = null;                // 触摸起点 Y
 let aiBeat = null;                  // 流式期间的心跳，保证任何情况下都在跟随
 // 生成中过程行的实时状态文字（流式阶段用；工具执行阶段为空，回退到按消息推断）
@@ -1544,7 +1538,7 @@ function aiEnsureColObserver(){
     box.addEventListener('scroll', function(){
       if(aiPinning){ aiPinning = false; return; }
       if(aiNearBottom(box)) aiStick = true;
-      else if(aiDragging) aiStick = false;
+      else if(aiPointerDown) aiStick = false; // 仅按住拖动时拖离底部才停跟随；松手后的惯性滚动不误判
     }, { passive:true });
     // 滚轮上滑 = 想看历史：仅当真的处于已下滚状态（上方还有内容可看）才停止跟随，
     // 防止内容不足一屏或已在顶部时的空滚误关跟随
@@ -1566,13 +1560,10 @@ function aiEnsureColObserver(){
     box.addEventListener('keydown', function(e){
       if(e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') aiStick = false;
     });
-    // 拖动滚动条期间按位置判断（拖离底部 → 停止；拖回底部 → 恢复）
-    box.addEventListener('pointerdown', function(){ aiDragging = true; clearTimeout(aiDragT); }, { passive:true });
+    // 按住 = 拖动滚动条中；松开立即结束（惯性滚动期间不再当作拖动）
+    box.addEventListener('pointerdown', function(){ aiPointerDown = true; }, { passive:true });
     ['pointerup','pointercancel'].forEach(function(ev){
-      box.addEventListener(ev, function(){
-        clearTimeout(aiDragT);
-        aiDragT = setTimeout(function(){ aiDragging = false; }, 500); // 覆盖拖动结束后的惯性滚动
-      }, { passive:true });
+      box.addEventListener(ev, function(){ aiPointerDown = false; }, { passive:true });
     });
   }
   if(col !== aiObservedCol){
@@ -1649,7 +1640,10 @@ async function aiAgentLoop(){
         '<div class="ai-body md" id="aiCurBody"></div></div>');
       scrollAiBottom();
       const bodyEl = box ? box.querySelector('#aiCurBody') : null;
-      const ui = { bodyEl: bodyEl, acc: '', procKey: aiLiveTurnKey() };
+      // 本轮草稿将落在 aiConvMessages 的末尾，key 必须与该下标一致；
+      // 不能用 aiLiveTurnKey()（它对整个回合返回同一个 key，会跟前面已完成轮次的
+      // proc 撞号，导致流式中途误开关上方轮次的过程块，内容在视口上方暴涨→跳屏）
+      const ui = { bodyEl: bodyEl, acc: '', procKey: 'proc-' + aiConvMessages.length };
       let res;
       try{
         res = await aiStreamRound(modelName, ui, lastRound);
