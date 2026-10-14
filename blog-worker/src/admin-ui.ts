@@ -256,6 +256,8 @@ a{color:var(--accent);text-decoration:none}
 .ai-tool-fold-sec{margin:0 0 6px}
 .ai-tool-fold-pre{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;line-height:1.6;max-height:240px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px}
 .ai-tool-fold-pre.err{color:#d9534f}
+/* 等待模型响应：气泡内的普通一行文字（无动画），首个输出片段到达时被内容整体替换 */
+.ai-wait{font-size:12.5px;color:var(--muted);padding:2px 0}
 /* 输入区上方一行的「i」按钮：查看已用 token / 缓存命中 */
 #aiUsageBtn{margin-left:auto;flex:0 0 auto;width:26px;height:26px;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;line-height:1}
 .ai-usage-pop{position:fixed;z-index:1200;background:var(--card);border:1px solid var(--border);border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:10px 12px;min-width:190px;font-size:12px}
@@ -1480,9 +1482,10 @@ function aiBubbleHtml(role, content, idx, m){
 // 2) 只有用户明确的「向上操作」（滚轮上滑/手指上划/键盘上键/拖滚动条远离底部）才停止跟随；
 // 3) 普通 scroll 事件（含程序化贴底、innerHTML 重建、内容增减导致的浏览器回弹）只允许
 //    「恢复跟随」，绝不允许停止跟随——避免一次误判就永久卡死。
-const AI_NEAR = 64;                 // 距底部多少 px 内算「在底部」
+const AI_NEAR = 24;                 // 距底部多少 px 内算「在底部」（太大会在用户小幅上滑时把人拽回去，看起来在抽动）
 let aiStick = true;                 // 是否跟随最新内容
 let aiPinning = false;              // 本次 scroll 事件是否由程序化贴底产生（要忽略，防止误判用户上滑）
+let aiUserScrollT = 0;              // 最近一次用户主动滚动的时刻：刚滚动完的 350ms 内不自动恢复跟随，避免边滑边被拽回
 let aiPointerDown = false;          // 指针/手指是否仍按住（拖滚动条时拖离底部才停跟随；松开后的惯性滚动不算）
 let aiTouchY = null;                // 触摸起点 Y
 let aiBeat = null;                  // 流式期间的心跳，保证任何情况下都在跟随
@@ -1492,11 +1495,13 @@ function aiScroller(){ return $('#aiMessages'); }
 // 距底部的剩余距离
 function aiBottomGap(box){ const b = box || aiScroller(); if(!b) return 0; return b.scrollHeight - b.scrollTop - b.clientHeight; }
 function aiNearBottom(box){ return aiBottomGap(box) <= AI_NEAR; }
-// 直接贴到底部；位置确实变化时标记 aiPinning（由随后的 scroll 事件消费并忽略）
+// 直接贴到底部；位置确实变化时标记 aiPinning（由随后的 scroll 事件消费并忽略）。
+// 距底 ≤2px 视为已贴住：scrollTop 与 scrollHeight 存在小数像素差，若不设阈值会每次
+// 都重新赋值 → 反复触发 scroll → 表现为底部一抽一抽
 function aiPinBottom(box){
   const b = box || aiScroller(); if(!b) return;
   const max = b.scrollHeight - b.clientHeight;
-  if(max > 0 && b.scrollTop < max){
+  if(max - b.scrollTop > 2){
     aiPinning = true;
     clearTimeout(aiPinBottom._r);
     aiPinBottom._r = setTimeout(function(){ aiPinning = false; }, 150); // 防止标记悬挂
@@ -1504,9 +1509,10 @@ function aiPinBottom(box){
   }
 }
 // 核心：在底部附近 → 恢复跟随并贴底；跟随中 → 贴底。任何内容变化后调用。
+// 恢复跟随需距用户上次主动滚动 ≥350ms：刚滑完就恢复会把人拽回去（小幅上滑时表现为抽动）
 function aiFollowOrPin(){
   const box = aiScroller(); if(!box) return;
-  if(aiNearBottom(box)) aiStick = true;
+  if(aiNearBottom(box) && Date.now() - aiUserScrollT > 350) aiStick = true;
   if(aiStick) aiPinBottom(box);
 }
 // 内容/渲染变化后调用：贴底并做几次延迟兜底（图片、代码块、字体异步撑高）
@@ -1537,13 +1543,13 @@ function aiEnsureColObserver(){
     // 回到底部附近 → 恢复跟随；用户拖滚动条远离底部 → 停止跟随；其余不改变状态
     box.addEventListener('scroll', function(){
       if(aiPinning){ aiPinning = false; return; }
-      if(aiNearBottom(box)) aiStick = true;
-      else if(aiPointerDown) aiStick = false; // 仅按住拖动时拖离底部才停跟随；松手后的惯性滚动不误判
+      if(aiNearBottom(box)){ if(Date.now() - aiUserScrollT > 350) aiStick = true; }
+      else if(aiPointerDown){ aiStick = false; aiUserScrollT = Date.now(); } // 仅按住拖动时拖离底部才停跟随；松手后的惯性滚动不误判
     }, { passive:true });
     // 滚轮上滑 = 想看历史：仅当真的处于已下滚状态（上方还有内容可看）才停止跟随，
     // 防止内容不足一屏或已在顶部时的空滚误关跟随
     box.addEventListener('wheel', function(e){
-      if(e.deltaY < 0 && box.scrollTop > 4) aiStick = false;
+      if(e.deltaY < 0 && box.scrollTop > 4){ aiStick = false; aiUserScrollT = Date.now(); }
     }, { passive:true });
     // 手指向下划（浏览更早内容）：停止跟随。
     // 必须是「明确的上滑手势」：位移超过 6px 且当前确实已下滚过，否则点按/收键盘的轻微
@@ -1553,12 +1559,14 @@ function aiEnsureColObserver(){
     }, { passive:true });
     box.addEventListener('touchmove', function(e){
       const y = (e.touches && e.touches[0]) ? e.touches[0].clientY : null;
-      if(y != null && aiTouchY != null && y - aiTouchY > 6 && box.scrollTop > 4) aiStick = false;
+      if(y != null && aiTouchY != null && y - aiTouchY > 6 && box.scrollTop > 4){ aiStick = false; aiUserScrollT = Date.now(); }
       aiTouchY = y;
     }, { passive:true });
+    // 触屏惯性滚动期间也要记录「用户在滚动」，防止恢复跟随把惯性中的手指拽回去
+    box.addEventListener('touchend', function(){ aiUserScrollT = Date.now(); }, { passive:true });
     // 键盘上翻：停止跟随
     box.addEventListener('keydown', function(e){
-      if(e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') aiStick = false;
+      if(e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home'){ aiStick = false; aiUserScrollT = Date.now(); }
     });
     // 按住 = 拖动滚动条中；松开立即结束（惯性滚动期间不再当作拖动）
     box.addEventListener('pointerdown', function(){ aiPointerDown = true; }, { passive:true });
@@ -1635,9 +1643,10 @@ async function aiAgentLoop(){
       const lastRound = rounds >= AI_MAX_ROUNDS;
       renderAiMessages();
       const box = $('#aiCol');
-      // 生成中的临时气泡：不显示「AI」标签
+      // 生成中的临时气泡：不显示「AI」标签；等待提示放在气泡内部，首个输出片段
+      // 会整体替换 innerHTML，因此出现/消失不会引起额外的高度跳变
       if(box) box.insertAdjacentHTML('beforeend', '<div class="ai-msg assistant">'+
-        '<div class="ai-body md" id="aiCurBody"></div></div>');
+        '<div class="ai-body md" id="aiCurBody"><div class="ai-wait">等待模型响应…</div></div></div>');
       scrollAiBottom();
       const bodyEl = box ? box.querySelector('#aiCurBody') : null;
       // 本轮草稿将落在 aiConvMessages 的末尾，key 必须与该下标一致；
