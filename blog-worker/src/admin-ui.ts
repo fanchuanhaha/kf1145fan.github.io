@@ -1172,10 +1172,14 @@ function aiToolNoteHtml(m){
 // 折叠块的展开状态（data-k -> 是否展开）。只记录用户手动操作过的块，
 // 其余按默认状态：过程块在生成中默认展开、生成结束后默认收起
 const aiFoldOpen = {};
-// 生成后立即绑定：用户手动展开/收起时记住状态，重渲染后按此恢复
+// 生成后立即绑定：只记录用户的「点击」操作（程序化 d.open= 不写记忆，
+// 否则流式中的自动收起/展开会在生成结束后把过程块永久顶成展开状态）
 function aiBindFolds(box){
   box.querySelectorAll('details[data-k]').forEach(function(d){
-    d.addEventListener('toggle', function(){ aiFoldOpen[d.getAttribute('data-k')] = d.open; });
+    const sm = d.querySelector('summary');
+    if(sm) sm.addEventListener('click', function(){
+      setTimeout(function(){ aiFoldOpen[d.getAttribute('data-k')] = d.open; }, 0);
+    });
   });
 }
 // 折叠块的 open 属性：用户操作过就听用户的，否则用默认值
@@ -1183,15 +1187,15 @@ function aiFoldAttr(key, defOpen){
   const v = aiFoldOpen[key];
   return (v === undefined ? !!defOpen : v) ? ' open' : '';
 }
-// 程序化设置过程块的展开状态（写入 aiFoldOpen，重渲染后保持一致）
+// 程序化设置过程块的展开状态（只改 DOM，不写 aiFoldOpen——那是用户手动操作的记忆）
 function aiSetProcOpen(key, open){
-  if(!key || aiFoldOpen[key] === open) return;
-  aiFoldOpen[key] = open;
+  if(!key) return;
   const d = document.querySelector('.ai-proc[data-k="' + key + '"]');
-  if(d){ d.open = open; scrollAiBottom(); } // 展开/收起过程块会改变高度，跟随状态下立即贴回底部
+  if(d && d.open !== !!open){ d.open = !!open; scrollAiBottom(); } // 展开/收起过程块会改变高度，跟随状态下立即贴回底部
 }
-// 注意：不能用「最后一条用户消息的下标+1」作为流式轮的 proc key——那样同一个回合里的
-// 多轮工具调用会与已完成轮次的 proc 撞号，导致流式中途误开关上方轮次的过程块
+// 注意：流式轮的 proc key 必须与渲染器给「本回合」过程块的 data-k 一致，
+// 即回合起点（最后一条用户消息的下标+1）。之前用 aiConvMessages.length，
+// 第 2 轮工具调用起两者对不上，导致「开始输出回答自动收起过程块」失效。
 function renderAiMessages(){
   const box = $('#aiCol'); if(!box) return;
   // 记录当前滚动位置：用户上滑阅读时，重渲染后要保持在原处（工具调用/流式渲染时尤其容易跳）
@@ -1212,6 +1216,12 @@ function renderAiMessages(){
   }
   box.innerHTML = html;
   aiBindFolds(box);
+  // 生成中：把本回合过程块的内部滚动钉到自身底部——步骤超过 420px 上限后新步骤
+  // 落在内部滚动区外，且每次重渲染都会把内部滚动位置归零，多工具时永远看不到最新步骤
+  if(aiStreaming){
+    const pb = box.querySelector('.ai-msg:last-child .ai-proc-body');
+    if(pb){ try{ pb.scrollTop = pb.scrollHeight; }catch(e){} }
+  }
   aiUpdateContinueBar();
   // 用户上滑阅读时：重渲染后恢复原滚动位置，避免被拉回底部或顶部
   if(!aiStick && scroller){ try{ scroller.scrollTop = keepTop; }catch(e){} }
@@ -1547,9 +1557,15 @@ function aiEnsureColObserver(){
       else if(aiPointerDown){ aiStick = false; aiUserScrollT = Date.now(); } // 仅按住拖动时拖离底部才停跟随；松手后的惯性滚动不误判
     }, { passive:true });
     // 滚轮上滑 = 想看历史：仅当真的处于已下滚状态（上方还有内容可看）才停止跟随，
-    // 防止内容不足一屏或已在顶部时的空滚误关跟随
+    // 防止内容不足一屏或已在顶部时的空滚误关跟随。
+    // 过程块/代码块等内部滚动区自己吃掉的滚动不算：多工具时用户在过程块里翻步骤，
+    // 不能因此把主视图的跟随关掉（内部区已到顶、滚动将连带主视图时才停）
     box.addEventListener('wheel', function(e){
-      if(e.deltaY < 0 && box.scrollTop > 4){ aiStick = false; aiUserScrollT = Date.now(); }
+      if(e.deltaY >= 0 || box.scrollTop <= 4) return;
+      const t = e.target;
+      const inner = (t && t.closest) ? t.closest('.ai-proc-body, .ai-tool-fold-pre, .ai-body pre, .ai-body table') : null;
+      if(inner && inner.scrollTop > 0) return;
+      aiStick = false; aiUserScrollT = Date.now();
     }, { passive:true });
     // 手指向下划（浏览更早内容）：停止跟随。
     // 必须是「明确的上滑手势」：位移超过 6px 且当前确实已下滚过，否则点按/收键盘的轻微
@@ -1649,10 +1665,13 @@ async function aiAgentLoop(){
         '<div class="ai-body md" id="aiCurBody"><div class="ai-wait">等待模型响应…</div></div></div>');
       scrollAiBottom();
       const bodyEl = box ? box.querySelector('#aiCurBody') : null;
-      // 本轮草稿将落在 aiConvMessages 的末尾，key 必须与该下标一致；
-      // 不能用 aiLiveTurnKey()（它对整个回合返回同一个 key，会跟前面已完成轮次的
-      // proc 撞号，导致流式中途误开关上方轮次的过程块，内容在视口上方暴涨→跳屏）
-      const ui = { bodyEl: bodyEl, acc: '', procKey: 'proc-' + aiConvMessages.length };
+      // 本轮草稿将落在 aiConvMessages 的末尾，proc key 必须与渲染器的回合 key 一致
+      // （回合起点 = 最后一条用户消息的下标+1），否则自动收起/展开过程块会落空
+      let turnStart = aiConvMessages.length;
+      for(let k = aiConvMessages.length - 1; k >= 0; k--){
+        if((aiConvMessages[k] || {}).role === 'user'){ turnStart = k + 1; break; }
+      }
+      const ui = { bodyEl: bodyEl, acc: '', procKey: 'proc-' + turnStart };
       let res;
       try{
         res = await aiStreamRound(modelName, ui, lastRound);
