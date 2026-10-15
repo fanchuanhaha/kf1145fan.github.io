@@ -1752,10 +1752,10 @@ function aiCleanMsg(m){
 // 贴底视图就会跟着上下抖；本方式让高度只增不减。
 // 同时用 min-height 记录流式期间达到过的最大高度，杜绝任何方向的收缩。
 function aiStreamHtml(acc){
-  const cut = acc.lastIndexOf('\n\n');
+  const cut = acc.lastIndexOf('\\n\\n');
   const stable = cut >= 0 ? acc.slice(0, cut + 2) : '';
   const tail = cut >= 0 ? acc.slice(cut + 2) : acc;
-  return (stable ? renderMd(stable) : '') + (tail ? '<p class="ai-tail">' + esc(tail).replace(/\n/g, '<br>') + '</p>' : '');
+  return (stable ? renderMd(stable) : '') + (tail ? '<p class="ai-tail">' + esc(tail).replace(/\\n/g, '<br>') + '</p>' : '');
 }
 function aiStreamPaint(ui, acc){
   if(!ui || !ui.bodyEl) return;
