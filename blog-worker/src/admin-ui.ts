@@ -1747,6 +1747,25 @@ function aiCleanMsg(m){
   for(const k in m){ if(k !== 'reasoning' && k !== 'denied' && k !== 'usage' && k !== 'perf' && k !== 'draft') c[k] = m[k]; }
   return c;
 }
+// 流式过程中的渲染：已完成段落走 Markdown，末尾未完成的段落用纯文本显示。
+// 全量重渲染半截 Markdown 时高度会来回变（表格/列表/代码块解析中途改变形状），
+// 贴底视图就会跟着上下抖；本方式让高度只增不减。
+// 同时用 min-height 记录流式期间达到过的最大高度，杜绝任何方向的收缩。
+function aiStreamHtml(acc){
+  const cut = acc.lastIndexOf('\n\n');
+  const stable = cut >= 0 ? acc.slice(0, cut + 2) : '';
+  const tail = cut >= 0 ? acc.slice(cut + 2) : acc;
+  return (stable ? renderMd(stable) : '') + (tail ? '<p class="ai-tail">' + esc(tail).replace(/\n/g, '<br>') + '</p>' : '');
+}
+function aiStreamPaint(ui, acc){
+  if(!ui || !ui.bodyEl) return;
+  ui.bodyEl.innerHTML = aiStreamHtml(acc);
+  try{
+    const h = ui.bodyEl.offsetHeight;
+    if(h > (ui.maxH || 0)) ui.maxH = h;
+    if(ui.maxH) ui.bodyEl.style.minHeight = ui.maxH + 'px';
+  }catch(e){}
+}
 // 流式请求一轮，返回 {content, toolCalls, reasoning, usage}
 async function aiStreamRound(modelName, ui, noTools){
   // 系统提示词（AI 提示词）+ 工具使用说明：仅在请求时附加，不写入历史
@@ -1843,7 +1862,7 @@ async function aiStreamRound(modelName, ui, noTools){
         aiSetDraft(acc);
         aiSaveProgress();
         const now = Date.now();
-        if(ui && ui.bodyEl && (now - lastPaint > 80)){ lastPaint = now; ui.bodyEl.innerHTML = renderMd(acc); scrollAiBottom(); }
+        if(ui && ui.bodyEl && (now - lastPaint > 80)){ lastPaint = now; aiStreamPaint(ui, acc); scrollAiBottom(); }
       }
       if(delta.tool_calls && delta.tool_calls.length){
         markFirst();
@@ -1868,8 +1887,8 @@ async function aiStreamRound(modelName, ui, noTools){
     const t = toolAcc[k];
     return { id: t.id || ('call_' + k), name: t.name, arguments: t.args || '{}' };
   }).filter(function(t){ return !!t.name; });
-  // 收尾：把流式内容按 Markdown 完整渲染一次
-  if(ui && ui.bodyEl) ui.bodyEl.innerHTML = renderMd(acc);
+  // 收尾：把流式内容按 Markdown 完整渲染一次（解除流式期间的最小高度锁定）
+  if(ui && ui.bodyEl){ ui.bodyEl.style.minHeight = ''; ui.bodyEl.innerHTML = renderMd(acc); }
   aiLivePhase = ''; // 流式阶段结束，过程行状态改由消息推断（如「正在调用 xxx…」）
   scrollAiBottom();
   // out：本轮的输出 token 数（取上游 usage），用于折算平均 token 速度
