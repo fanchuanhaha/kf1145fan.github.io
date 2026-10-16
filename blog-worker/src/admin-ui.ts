@@ -238,6 +238,8 @@ a{color:var(--accent);text-decoration:none}
 .ai-body.md input[type=checkbox]{width:auto;margin:0 6px 0 0;vertical-align:middle}
 /* 思考与工具调用过程：默认收起成一行；生成中这一行显示实时状态，结束后显示「已深度思考 · N 次工具调用 · 用时 Xs」，点开看完整过程 */
 .ai-proc{border:1px solid var(--border);border-radius:2px;background:var(--hover);margin:0 0 8px}
+/* 收起成一行的过程块：翻看消息时吸在滚动区顶部，随时能看到「最新一次调用」；点开后不再吸顶 */
+.ai-proc:not([open]){position:sticky;top:0;z-index:6}
 .ai-proc>summary{cursor:pointer;font-size:12px;color:var(--muted);padding:6px 10px;outline:none}
 .ai-proc>summary:hover{color:var(--fg)}
 .ai-proc-body{padding:2px 10px 8px;max-height:420px;overflow:auto;font-size:12.5px;color:var(--muted)}
@@ -1396,7 +1398,7 @@ function aiTurnHtml(turn, startIdx, live){
     if(m.tool_calls && m.tool_calls.length) continue;
     if(typeof m.content === 'string' && m.content.trim()){ ansIdx = k; break; }
   }
-  let proc = '', toolCount = 0, anyDenied = false;
+  let proc = '', toolCount = 0, anyDenied = false, lastTool = '';
   for(let k = 0; k < turn.length; k++){
     const m = turn[k] || {};
     if(m.role === 'tool') continue; // 结果已合并到对应「调用」处展示
@@ -1417,6 +1419,7 @@ function aiTurnHtml(turn, startIdx, live){
         const r = resById[t.id];
         if(r && r.denied) anyDenied = true;
         toolCount++;
+        lastTool = f.name || lastTool;
         proc += aiToolFoldHtml(f.name, f.arguments, r, 'tool-' + startIdx + '-' + k + '-' + toolCount);
       });
     }
@@ -1452,7 +1455,8 @@ function aiTurnHtml(turn, startIdx, live){
       const hasReasoning = turn.some(function(m){ return !!(m && m.reasoning); });
       procHtml = '<details class="ai-proc" data-k="' + procKey + '"' + fold + '>' +
         '<summary>' + (hasReasoning ? '已深度思考' : '已完成') +
-        (toolCount ? ' · ' + toolCount + ' 次工具调用' : '') +
+        (lastTool ? ' · 最后调用 ' + esc(lastTool) : '') +
+        (toolCount ? ' · 共 ' + toolCount + ' 次工具调用' : '') +
         (ms > 0 ? ' · 用时 ' + (ms / 1000).toFixed(1) + 's' : '') +
         (anyDenied ? '（含被拒绝）' : '') + '</summary>' + body + '</details>';
     }
