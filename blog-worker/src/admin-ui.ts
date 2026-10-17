@@ -238,9 +238,9 @@ a{color:var(--accent);text-decoration:none}
 .ai-body.md input[type=checkbox]{width:auto;margin:0 6px 0 0;vertical-align:middle}
 /* 思考与工具调用过程：默认收起成一行；生成中这一行显示实时状态，结束后显示「已深度思考 · N 次工具调用 · 用时 Xs」，点开看完整过程 */
 .ai-proc{border:1px solid var(--border);border-radius:2px;background:var(--hover);margin:0 0 8px}
-/* 收起成一行的过程块：翻看消息时吸在滚动区顶部，随时能看到「最新一次调用」；点开后不再吸顶 */
-.ai-proc:not([open]){position:sticky;top:0;z-index:6}
-.ai-proc>summary{cursor:pointer;font-size:12px;color:var(--muted);padding:6px 10px;outline:none}
+/* 过程块摘要行（「已深度思考 · 最后调用 …」）：吸在滚动区顶部作为该回合的「天花板」，
+   往下可自由滚动，往上滚到这行即停；随时可点一下收起整个过程块 */
+.ai-proc>summary{position:sticky;top:0;z-index:6;background:var(--hover);cursor:pointer;font-size:12px;color:var(--muted);padding:6px 10px;outline:none}
 .ai-proc>summary:hover{color:var(--fg)}
 .ai-proc-body{padding:2px 10px 8px;max-height:420px;overflow:auto;font-size:12.5px;color:var(--muted)}
 .ai-proc-seg{margin:0 0 8px}
