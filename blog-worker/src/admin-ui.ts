@@ -1,7 +1,8 @@
 /**
  * 统一后台页：/admin（独立于登录页 /admin/login）。
  * - 无大圆角、简约、适配深色模式、字号偏小
- * - 顶部标签：管理文章（默认首页）/ 评论管理；写作页从「＋ 添加新文章」按钮进入
+ * - 顶部标签：管理文章（默认首页）/ 评论管理；写作页从「＋ 添加新文章」按钮进入，
+ *   批量上传页不占顶部标签栏，从写作页「批量上传」按钮（或管理页按钮）进入
  * - 登录态：由服务端 Cookie(wl_token) 判定是否返回本页；本页加载时读取 token，
  *   无效则跳转 /admin/login，刷新不再闪登录界面
  * - 编辑器：Vditor「分屏复杂模式」（SV，参考 cp.802213.xyz）
@@ -3619,7 +3620,6 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
 
 <div class="wk-tabs">
   <button class="wk-tab ${INITIAL === "manage" ? "active" : ""}" data-tab="manage">管理文章</button>
-  <button class="wk-tab ${INITIAL === "upload" ? "active" : ""}" data-tab="upload">批量上传</button>
   <button class="wk-tab ${INITIAL === "comments" ? "active" : ""}" data-tab="comments">评论管理</button>
   <button class="wk-tab ${INITIAL === "files" ? "active" : ""}" data-tab="files">文件管理</button>
   <button class="wk-tab ${INITIAL === "build" ? "active" : ""}" data-tab="build">部署记录</button>
@@ -3659,7 +3659,10 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
   <div id="page-upload" class="${pageCls("upload")}">
     <div class="wk-card">
       <div class="toolbar" style="justify-content:space-between;align-items:center">
-        <h3 class="wk-title" style="margin:0;border:none;padding:0">批量上传文章</h3>
+        <div style="display:flex;align-items:center;gap:8px;min-width:0">
+          <button class="wk-btn ghost sm" onclick="go('manage')">← 返回管理文章</button>
+          <h3 class="wk-title" style="margin:0;border:none;padding:0">批量上传文章</h3>
+        </div>
         <div style="display:flex;gap:6px;align-items:center">
           <span class="wk-label" style="margin:0">已选 <b id="uploadCount">0</b> 个文件</span>
           <button class="wk-btn ghost sm" id="upPickBtn">＋ 选择文件</button>
@@ -3681,7 +3684,10 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
           <button class="wk-btn ghost sm" onclick="go('manage')">← 返回管理文章</button>
           <h3 class="wk-title" style="margin:0;border:none;padding:0" id="editorTitle">发布新文章</h3>
         </div>
-        <button class="wk-btn" id="saveBtn">发布文章</button>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="wk-btn ghost sm" onclick="go('upload')">批量上传</button>
+          <button class="wk-btn" id="saveBtn">发布文章</button>
+        </div>
       </div>
       <label class="wk-label">标题</label>
       <input class="wk-input" id="title" placeholder="文章标题">
