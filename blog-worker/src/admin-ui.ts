@@ -91,7 +91,18 @@ a{color:var(--accent);text-decoration:none}
 .wk-input{width:100%;border:1px solid var(--border);border-radius:3px;padding:6px 10px;font-size:13px;font-family:inherit;outline:none;background:var(--input-bg);color:var(--fg)}
 .wk-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(var(--accent-rgb),.12)}
 .wk-row{display:flex;gap:12px}
-@media(max-width:640px){.wk-row{flex-direction:column;gap:0}.wk-row>.wk-field{flex-basis:auto;width:100%}}
+@media(max-width:640px){
+.wk-row{flex-direction:column;gap:0}.wk-row>.wk-field{flex-basis:auto;width:100%}
+/* 工具栏统一允许换行，避免一行排不下时把右侧按钮顶出屏幕 */
+.toolbar{flex-wrap:wrap}
+/* 列表行：一行放不下时把操作按钮折到名字下一行，不再横向溢出/与文件名重叠 */
+.wk-list li{flex-wrap:wrap}
+.wk-list .ops{flex-wrap:wrap;row-gap:6px;max-width:100%}
+/* 文件管理：标题+分支切换独占一行（两端分布），操作按钮独立成行换行排布；分支选择器可收缩 */
+#page-files .toolbar>div:first-child{width:100%;justify-content:space-between}
+#page-files #fileOps{width:100%}
+#page-files #branchSel{min-width:0;max-width:52vw}
+}
 .wk-row>.wk-field{flex:1}
 /* 按钮 */
 .wk-btn{background:var(--accent);color:#fff;border:none;border-radius:3px;padding:7px 14px;font-size:13px;cursor:pointer;font-weight:500}
@@ -1744,6 +1755,16 @@ async function aiAgentLoop(){
             const out = await aiAskSecret(args);
             if(!out.ok) denied = true;
             resultStr = JSON.stringify(out);
+          } else if(t.name === 'wait_workflow'){
+            // 等待工具由前端轮询执行（不受 Worker 子请求/时长限制）：阻塞等当前工作流跑完再继续，
+            // 成功/失败都返回；等待期间把进度实时写进工具消息，用户能看到已等多久
+            const tm = { role:'tool', tool_call_id:t.id, name:t.name, content:'（等待工作流运行结束…）', denied:false };
+            aiConvMessages.push(tm);
+            resultStr = await aiWaitWorkflow(args, tm);
+            tm.content = resultStr;
+            aiSaveProgress();
+            renderAiMessages();
+            try{ initBuildStatus(); }catch(e){}
           } else {
             let allow = true;
             if(aiNeedConfirm(t.name)) allow = await aiAskConfirm(t.name, args);
@@ -1756,7 +1777,8 @@ async function aiAgentLoop(){
               resultStr = JSON.stringify({ ok:false, error:'用户已拒绝执行该操作' });
             }
           }
-          aiConvMessages.push({ role:'tool', tool_call_id:t.id, name:t.name, content: resultStr, denied: denied });
+          if(t.name !== 'wait_workflow') // wait_workflow 的工具消息已在等待前占位并实时更新，不重复入列
+            aiConvMessages.push({ role:'tool', tool_call_id:t.id, name:t.name, content: resultStr, denied: denied });
           aiSaveProgress(); // 每个工具结果落盘，刷新后能看到已执行到哪一步
           // AI 触发/取消工作流后，同步顶部运行横幅（会聚合展示所有正在运行的工作流）
           try{ aiSyncBuildBanner(t.name, args, resultStr); }catch(e){}
@@ -1966,6 +1988,60 @@ function aiAskConfirm(name, args){
     div.querySelector('[data-yes]').onclick = function(){ div.remove(); resolve(true); };
     div.querySelector('[data-no]').onclick = function(){ div.remove(); resolve(false); };
   });
+}
+// ---------- AI 工具：等待工作流运行结束（前端轮询，成功/失败都返回）----------
+// args: { workflow?: 'update-gh.yml', timeout_minutes?: number }
+// msg: 已入列的工具消息，等待期间把「已等多久」写进去（约每 30 秒刷新一次，避免频繁重渲染）
+async function aiWaitWorkflow(args, msg){
+  const wf = String((args && (args.workflow || args.workflow_id)) || '').trim();
+  const maxMin = Math.min(Math.max(Number(args && args.timeout_minutes) || 10, 1), 30);
+  const t0 = Date.now();
+  const deadline = t0 + maxMin * 60000;
+  let grace = 0, lastNote = 0;
+  const query = API_BASE + '/workflows/runs?limit=5' + (wf ? ('&workflow=' + encodeURIComponent(wf)) : '');
+  while (true) {
+    const r = await api(query);
+    const d = (r.ok && r.data && r.data.ok) ? r.data : null;
+    if (!d) return JSON.stringify({ ok:false, error:'查询工作流状态失败：' + ((r.data && r.data.error) || r.status) });
+    if (!d.running) {
+      // 刚触发的工作流要过一两秒才会登记成 run：给 8 秒缓冲确认，避免误报「没有在跑」
+      if (grace < 2 && Date.now() - t0 < 15000) {
+        grace++;
+        if (msg && Date.now() - lastNote > 3000) {
+          lastNote = Date.now();
+          msg.content = '暂未检测到正在运行的工作流，' + (grace * 4) + ' 秒后再次确认…';
+          renderAiMessages();
+        }
+        await new Promise(res => setTimeout(res, 4000));
+        continue;
+      }
+      const runs = (d.runs || []).slice(0, 3).map(function(x){
+        return { name:x.name, workflow:x.workflow, status:x.status, conclusion:x.conclusion, created_at:x.created_at };
+      });
+      const latest = d.latest || runs[0] || null;
+      return JSON.stringify({
+        ok: true, all_done: true, waited_seconds: Math.round((Date.now() - t0) / 1000), running: false,
+        latest: latest, runs: runs,
+        message: latest
+          ? ('当前没有在运行的工作流。最近一次' + (wf ? ('「' + wf + '」') : '') + '：' + (latest.name || latest.workflow || '') + ' → ' + latest.status + (latest.conclusion ? ('/' + latest.conclusion) : ''))
+          : ('当前没有' + (wf ? ('「' + wf + '」') : '') + '的任何运行记录'),
+      });
+    }
+    const secs = Math.round((Date.now() - t0) / 1000);
+    if (msg && Date.now() - lastNote > 30000) {
+      lastNote = Date.now();
+      const live = d.latest ? ('「' + (d.latest.name || d.latest.workflow || wf) + '」' + d.latest.status) : '工作流';
+      msg.content = '已等待 ' + Math.floor(secs / 60) + ' 分 ' + (secs % 60) + ' 秒，' + live + '仍在运行…';
+      renderAiMessages();
+    }
+    if (Date.now() >= deadline) {
+      return JSON.stringify({
+        ok: false, timeout: true, waited_seconds: secs, running: true, latest: d.latest || null,
+        message: '等待超时（' + maxMin + ' 分钟），工作流仍在运行；可用 workflow_runs 查看进度，或再次调用 wait_workflow 继续等。',
+      });
+    }
+    await new Promise(res => setTimeout(res, 5000));
+  }
 }
 // AI 需要凭据但用户尚未提供：前端弹窗本地输入，值直接写入服务端密钥库，绝不发送给 AI
 function aiAskSecret(args){
@@ -2840,24 +2916,49 @@ async function loadBuildHistory(){
 
 // ---------- 工作流日志（Cloudflare 代理获取，不跳转 GitHub）----------
 let logModalRunId='';
-function closeLogModal(){ const m=$('#logModal'); if(m) m.classList.add('hidden'); }
+let logModalTimer=null; // 运行中自动刷新（实时日志）
+function closeLogModal(){ stopLogRefresh(); const m=$('#logModal'); if(m) m.classList.add('hidden'); }
+function stopLogRefresh(){ if(logModalTimer){ clearInterval(logModalTimer); logModalTimer=null; } }
 async function fetchBuildLog(runId){
   const r=await api(API_BASE+'/build/log?id='+encodeURIComponent(runId||''));
   if(r.status===401){ redirectLogin(); return null; }
-  if(!r.ok||!r.data||!r.data.ok) return null;
+  if(!r.ok||!r.data) return null;
   return r.data;
 }
+// 渲染日志正文；运行中在顶部加提示。刷新时若用户正贴着底部就继续贴底，否则保持阅读位置
+function renderLogBody(d){
+  const body=$('#logModalBody'); if(!body) return;
+  const atBottom = body.scrollTop+body.clientHeight >= body.scrollHeight-40;
+  const oldLen = body.textContent.length;
+  body.textContent=(d.running?'【运行中 · 实时日志，每 5 秒自动刷新】\\n\\n':'')+((d.running?'':'【状态：'+(d.status||'完成')+(d.conclusion?(' · '+(d.conclusion==='success'?'成功':d.conclusion==='failure'?'失败':d.conclusion)):'')+'】\\n\\n'))+(d.text||'（暂无日志输出）');
+  if(atBottom || oldLen===0) body.scrollTop=body.scrollHeight;
+}
+async function refreshLogModal(final){
+  const d=await fetchBuildLog(logModalRunId);
+  const body=$('#logModalBody');
+  if(!d||!d.ok){
+    // 运行刚触发还在排队时 GitHub 暂时没有日志：给出原因并继续自动重试
+    const err=(d&&d.error)||'获取日志失败';
+    if(body && (body.textContent.indexOf('正在从 GitHub')===0 || body.textContent.indexOf('【运行中')===0 || body.textContent.indexOf('（暂无可显示')===0))
+      body.textContent='（暂无可显示的日志：'+err+'）\\n\\n将每 5 秒自动重试，运行产出日志后会自动显示…';
+    return;
+  }
+  renderLogBody(d);
+  if(!d.running){ stopLogRefresh(); }
+}
 async function showBuildLog(runId){
-  const m=$('#logModal'), body=$('#logModalBody'); if(!m||!body) return;
+  const m=$('#logModal'); if(!m) return;
   logModalRunId=runId||'';
   m.classList.remove('hidden');
   const gh=$('#logModalGh');
   if(gh) gh.href=logModalRunId?('https://github.com/__REPO__/actions/runs/'+logModalRunId):'https://github.com/__REPO__/actions';
   const ttl=$('#logModalTitle'); if(ttl) ttl.textContent=logModalRunId?('#'+logModalRunId):'（最近一次）';
-  body.textContent='正在从 GitHub 获取日志（经 Cloudflare 代理）…';
-  const d=await fetchBuildLog(logModalRunId);
-  if(!d){ body.textContent='获取日志失败，请稍后重试，或点右上角「在 GitHub 打开」查看。'; return; }
-  body.textContent=d.text||'（日志为空）';
+  const body=$('#logModalBody');
+  if(body) body.textContent='正在从 GitHub 获取日志（经 Cloudflare 代理）…';
+  stopLogRefresh();
+  await refreshLogModal(false);
+  // 运行中：每 5 秒自动拉一次实时日志，直到运行结束（关弹窗即停）
+  logModalTimer=setInterval(function(){ refreshLogModal(false); }, 5000);
 }
 // 把失败日志发给 AI 助手分析：切到 AI 页，填入日志并自动发送
 async function sendBuildLogsToAi(runId){
@@ -3921,12 +4022,19 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 设置（各分区可展开/收起：后台设置、外观、SMTP、站点功能、订阅设置、API 说明） -->
+  <!-- 设置（各分区可展开/收起：后台设置[外观主题+工作流+站点功能]、SMTP、订阅设置、API 说明） -->
   <div id="page-settings" class="${pageCls("settings")}">
     <details class="wk-collapse">
       <summary>后台设置</summary>
       <div class="wk-collapse-body">
+        <p class="wk-label" style="margin-top:0">外观与主题色仅作用于你这台设备的浏览器，不影响访客；工作流模式与站点功能对全站生效。</p>
         <div class="filters" style="margin:0 0 4px">
+          <span class="wk-label" style="margin:0">深浅色</span>
+          <select class="wk-input" id="setThemeMode" onchange="applyThemeMode(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
+            <option value="auto">跟随系统</option>
+            <option value="light">浅色模式</option>
+            <option value="dark">深色模式</option>
+          </select>
           <span class="wk-label" style="margin:0">主题色</span>
           <select class="wk-input" id="setAccent" onchange="applyAccent(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
             <option value="#f97316">橙色（默认）</option>
@@ -3939,7 +4047,6 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
             <option value="#eab308">金色</option>
             <option value="#64748b">石板灰</option>
           </select>
-          <span class="wk-label" style="margin:0">选择后立即生效并记住，仅作用于你这台设备的浏览器，不影响访客</span>
         </div>
         <div class="filters" style="margin:14px 0 0">
           <span class="wk-label" style="margin:0">工作流触发模式</span>
@@ -3950,24 +4057,19 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         </div>
         <p class="wk-label" style="margin:8px 0 0;line-height:1.7">自动：发布 / 删除 / 批量上传文章后自动运行「更新 GitHub Pages」工作流，站点自动更新（新文章构建完成后邮件通知订阅者）。<br>手动：内容只推送到 GitHub，不自动构建；之后会在顶部日志位置提示你去运行工作流，适合攒几篇一起构建。</p>
         <div class="filters" style="margin:14px 0 0">
+          <span class="wk-label" style="margin:0">访问量数据保留</span>
+          <input class="wk-input" id="retentionDays" type="number" min="1" max="3650" style="width:110px" placeholder="365">
+          <span class="wk-label" style="margin:0">天</span>
+          <label class="wk-label" style="display:flex;align-items:center;gap:6px;margin:0 0 0 14px;cursor:pointer">
+            <input type="checkbox" id="allowGuestComment" style="width:auto"> 允许访客评论（关闭后仅登录用户可评论）
+          </label>
+        </div>
+        <div class="filters" style="margin:14px 0 0">
           <button class="wk-btn sm" onclick="saveWorkflowMode()">保存工作流模式</button>
+          <button class="wk-btn sm" onclick="saveSiteSettings()">保存站点功能</button>
         </div>
         <div class="msg" id="adminMsg"></div>
-      </div>
-    </details>
-
-    <details class="wk-collapse">
-      <summary>外观 · 主题</summary>
-      <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">深浅色可切换，选择后立即生效并记住；仅作用于你这台设备的浏览器，不影响访客。</p>
-        <div class="filters" style="margin:0 0 8px">
-          <span class="wk-label" style="margin:0">深浅色</span>
-          <select class="wk-input" id="setThemeMode" onchange="applyThemeMode(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
-            <option value="auto">跟随系统</option>
-            <option value="light">浅色模式</option>
-            <option value="dark">深色模式</option>
-          </select>
-        </div>
+        <div class="msg" id="siteMsg"></div>
       </div>
     </details>
 
@@ -4010,25 +4112,6 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
           <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
           <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
         </div>
-      </div>
-    </details>
-
-    <details class="wk-collapse">
-      <summary>站点功能</summary>
-      <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">默认保留 365 天访问数据，可设置更长或更短；超期数据会自动清理。</p>
-        <div class="filters" style="margin:0 0 12px">
-          <span class="wk-label" style="margin:0">访问量数据保留</span>
-          <input class="wk-input" id="retentionDays" type="number" min="1" max="3650" style="width:110px" placeholder="365">
-          <span class="wk-label" style="margin:0">天</span>
-        </div>
-        <label class="wk-label" style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer">
-          <input type="checkbox" id="allowGuestComment" style="width:auto"> 允许访客评论（关闭后仅登录用户可评论）
-        </label>
-        <div class="filters" style="margin:14px 0 0">
-          <button class="wk-btn sm" onclick="saveSiteSettings()">保存设置</button>
-        </div>
-        <div class="msg" id="siteMsg"></div>
       </div>
     </details>
 

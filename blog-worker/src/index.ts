@@ -1057,6 +1057,7 @@ const AI_TOOLS = [
   { type: "function", function: { name: "workflow_runs", description: "查询工作流的运行记录（默认查全部，可传 workflow 指定某个工作流的文件名，如 deploy.yml、clone-repo.yml），用于了解当前是否有工作流在运行及最近结果。", parameters: { type: "object", properties: { workflow: { type: "string", description: "可选：工作流文件名，省略则查全部工作流" } } } } },
   { type: "function", function: { name: "trigger_workflow", description: "触发运行指定的 GitHub 工作流。workflow_id 传工作流文件名（如 clone-repo.yml、deploy.yml）或工作流名称；可用 inputs 传 workflow_dispatch 的输入参数。", parameters: { type: "object", properties: { workflow_id: { type: "string", description: "工作流文件名（如 clone-repo.yml）或名称" }, ref: { type: "string", description: "可选：分支，默认当前分支" }, inputs: { type: "object", description: "可选：workflow_dispatch 输入参数键值对" } }, required: ["workflow_id"] } } },
   { type: "function", function: { name: "cancel_workflow", description: "取消正在运行的 GitHub 工作流。runId 可省略，默认取消最近一次仍在运行的工作流。", parameters: { type: "object", properties: { runId: { type: "string", description: "可选：要取消的 run id，省略则取消最近一次运行中的工作流" } } } } },
+  { type: "function", function: { name: "wait_workflow", description: "等待当前正在运行的 GitHub 工作流全部结束（无论成功还是失败都会返回）后再继续，适合触发部署/解压/克隆后阻塞等它跑完。返回各次运行的最终状态与结论。", parameters: { type: "object", properties: { workflow: { type: "string", description: "可选：只等待指定工作流（文件名如 update-gh.yml / deploy.yml），省略则等待所有正在运行的工作流" }, timeout_minutes: { type: "number", description: "可选：最长等待分钟数，默认 10，最大 30；超时返回 running=true" } } } } },
   { type: "function", function: { name: "clone_repo", description: "把一个外部 Git 仓库克隆到当前博客仓库的指定目录（例如克隆一个 Hexo 主题到 themes/xxx）。由 GitHub 工作流异步完成，约 10 秒。repo_url 支持 owner/repo 或完整 URL。", parameters: { type: "object", properties: { repo_url: { type: "string", description: "要克隆的仓库：owner/repo 或完整 URL" }, target_dir: { type: "string", description: "目标目录，如 themes/next" }, ref: { type: "string", description: "可选：源仓库的分支或标签" }, branch: { type: "string", description: "可选：提交到当前仓库的分支" } }, required: ["repo_url", "target_dir"] } } },
   { type: "function", function: { name: "move_path", description: "移动或重命名仓库中的文件/目录（目录会整体移动，一次提交完成，可用于给主题/资源改名）。目标已存在时自动加序号避免覆盖。", parameters: { type: "object", properties: { from: { type: "string", description: "原路径" }, to: { type: "string", description: "新路径" }, branch: { type: "string", description: "可选：分支" } }, required: ["from", "to"] } } },
   { type: "function", function: { name: "create_folder", description: "在仓库中新建一个文件夹（自动放入 .gitkeep 占位，空目录也能被 Git 保留）。", parameters: { type: "object", properties: { path: { type: "string", description: "文件夹路径，如 source/images" }, branch: { type: "string", description: "可选：分支" } }, required: ["path"] } } },
@@ -1093,9 +1094,9 @@ async function aiToolsHint(db: D1Database): Promise<string> {
     "发邮件：用 send_email 发单封（to）或 broadcast=true 群发给已确认订阅者；需先在设置里配置 SMTP。发送前可先用 get_settings 确认 smtp.host 与 hasPass。",
     "联网：用 http_get 抓取网页或调用 GET 类接口，用 http_post 提交数据或调用写入类接口（需 http(s):// 开头，可自定义 headers/contentType）。响应体会自动截断，超长内容请分页或改用接口的查询参数。",
     "下载与解压：用 download_file 把网络上的文件（含 GitHub 仓库 owner/repo 源码 zip）保存进仓库；用 unzip_file 解压仓库里的 zip（<50MB 即时完成，>50MB 触发 GitHub 工作流异步解压，可用 unzip_status 查看进度）。",
-    "部署排错：用 build_status 查看部署状态；用 get_build_logs 拉取日志文本排查失败原因，workflow 可指定 deploy.yml / clone-repo.yml / unzip.yml / update-cf.yml（省略为 deploy.yml），runId 省略则取该工作流最近一次。日志 zip 需要运行结束后才可取；若提示「日志尚不可用」，先 sleep 几秒再试，或先 workflow_runs 确认该次运行已结束。",
-    "等待：用 sleep 等待 seconds 秒（1-60）；触发一个工作流后通常需要等待几秒到几十秒，用 sleep 等待后再 workflow_runs / get_build_logs 查询进度与结果。",
-    "工作流控制：用 list_workflows 查看仓库里有哪些工作流；用 workflow_runs 查看运行记录（可传 workflow 文件名）；用 trigger_workflow 运行指定的工作流（workflow_id 传文件名如 deploy.yml，可带 inputs）；用 cancel_workflow 停止当前正在运行的工作流（可传 runId，省略则取消最近一次运行中的）。",
+    "部署排错：用 build_status 查看部署状态；用 get_build_logs 拉取日志文本排查失败原因，workflow 可指定 deploy.yml / clone-repo.yml / unzip.yml / update-cf.yml（省略为 deploy.yml），runId 省略则取该工作流最近一次。运行中也能拉到实时日志（已产出部分）；刚触发还未产出时若提示「日志尚不可用」，先 wait_workflow 或 sleep 几秒再试。",
+    "等待：用 wait_workflow 阻塞等到当前工作流跑完（成功/失败都会返回再继续），可传 workflow 只等某个工作流、timeout_minutes 设上限（默认 10 分钟）；只需短暂间隔时用 sleep 等 seconds 秒（1-60）。",
+    "工作流控制：用 list_workflows 查看仓库里有哪些工作流；用 workflow_runs 查看运行记录（可传 workflow 文件名）；用 trigger_workflow 运行指定的工作流（workflow_id 传文件名如 deploy.yml，可带 inputs）；触发后如需等它结束再继续（比如等部署完再验证站点），直接调用 wait_workflow，不要反复 sleep+workflow_runs 轮询；用 cancel_workflow 停止当前正在运行的工作流（可传 runId，省略则取消最近一次运行中的）。",
     "克隆仓库：把外部仓库/主题放进仓库优先用 clone_repo（例如 repo_url=theme-next/hexo-theme-next, target_dir=themes/next），由 GitHub 工作流异步完成（约 10-30 秒，可用 sleep 后 workflow_runs/get_build_logs 跟踪）。注意：目标目录必须不存在或为空，否则工作流会中止；若目录已存在，先删除或换个目录名。不要把整仓源码 zip 用 download_file+unzip_file 代替 clone（zip 解压出来会多一层目录，且主题一般不需要）。",
     "文件管理增强：用 move_path 移动或重命名文件/目录（目录整体一次提交）；用 create_folder 新建文件夹（自带 .gitkeep 占位）；用 search_files 按文件名或内容搜索仓库（content=true 搜内容）。",
     "部署排错增强：用 compare_branches 对比两个分支的差异（提交与变更文件）；用 repo_config 一次读取关键配置文件（_config.yml、wrangler.toml 等）并列出所有工作流文件。",
@@ -1500,6 +1501,9 @@ async function aiRunTool(env: Bindings, name: string, args: Record<string, unkno
       return jr(await handleTriggerWorkflow(env, { workflow_id: s("workflow_id"), ref: s("ref"), inputs: args.inputs }));
     case "cancel_workflow":
       return jr(await handleCancelWorkflow(env, { run_id: s("runId") }));
+    case "wait_workflow":
+      // 等待类工具由前端轮询执行（避免 Worker 子请求/时长限制），正常不会落到这里
+      return JSON.stringify({ ok: false, error: "wait_workflow 由前端轮询处理，请重试" });
     case "sleep": {
       const sec = Math.min(Math.max(Math.round(Number(s("seconds")) || 1), 1), 60);
       await new Promise((r) => setTimeout(r, sec * 1000));
@@ -3053,15 +3057,21 @@ async function handleBuildHistory(env: Bindings): Promise<Response> {
   }
 }
 
-// 部署工作流日志（Cloudflare 代理）：获取 GitHub Actions 运行日志 zip，解压为纯文本返回。
+// 部署工作流日志（Cloudflare 代理）：
+// - 运行已结束：拉取 GitHub 日志 zip 并解压为纯文本（完整日志）
+// - 运行进行中：zip 尚未生成，改为逐个 job 拉取 /actions/jobs/{id}/logs 纯文本（实时已产出部分），
+//   并附每个 job 的步骤状态清单，运行中也能看到日志（解决「日志不全/拿不到」）
 // GitHub 的 /actions/runs/{id}/logs 会 302 到签名地址（zip），fetch 自动跟随；用 fflate 解压。
 async function handleBuildLog(env: Bindings, runId: string, workflow?: string): Promise<Response> {
   const { token, repo, headers } = ghConfig(env);
   if (!token) return json({ ok: false, error: "GH_TOKEN not configured" }, 500);
   const wf = String(workflow || "").trim() || "deploy.yml";
+  const ACTIVE = new Set(["in_progress", "queued", "pending", "waiting", "requested"]);
   try {
     let id = String(runId || "").trim();
     let runStatus = "";
+    let runConclusion = "";
+    let runName = "";
     if (!id) {
       const lr = await fetch(
         `https://api.github.com/repos/${repo}/actions/workflows/${encodeURIComponent(wf)}/runs?per_page=1`,
@@ -3073,22 +3083,50 @@ async function handleBuildLog(env: Bindings, runId: string, workflow?: string): 
       const latest = ld.workflow_runs?.[0];
       id = String(latest?.id || "");
       runStatus = String(latest?.status || "");
+      runConclusion = String(latest?.conclusion || "");
       if (!id) return json({ ok: false, error: `工作流 ${wf} 还没有运行记录` }, 404);
+    } else {
+      // 给定 runId 时补一次运行信息（状态/名称），用于判断是否运行中
+      const rd = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${id}`, { headers }).catch(() => null);
+      if (rd && rd.ok) {
+        const rm = (await rd.json()) as any;
+        runStatus = String(rm?.status || "");
+        runConclusion = String(rm?.conclusion || "");
+        runName = String(rm?.display_title || rm?.name || "");
+      }
+    }
+    const running = ACTIVE.has(runStatus);
+    if (running) {
+      const live = await ghRunJobLogs(env, repo, headers, id, true);
+      if (live) return json({ ok: true, id, running: true, live: true, name: runName, status: runStatus, text: live });
+      return json(
+        {
+          ok: false,
+          id,
+          status: runStatus || "in_progress",
+          error: "日志尚不可用：该次运行还在排队/尚未产出日志。请 wait_workflow 或稍等几秒再试。",
+        },
+        409,
+      );
     }
     const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${id}/logs`, { headers });
     if (!res.ok) {
-      // 运行尚未结束时 GitHub 不提供日志（返回 404）
+      // 运行尚未结束时 GitHub 不提供日志（返回 404）；结束但 zip 拉取失败时兜底用 job 日志
       if (res.status === 404 || res.status === 410) {
+        const live = await ghRunJobLogs(env, repo, headers, id, false);
+        if (live) return json({ ok: true, id, running: false, live: true, name: runName, status: runStatus, text: live });
         return json(
           {
             ok: false,
             id,
             status: runStatus || "in_progress",
-            error: "日志尚不可用：该次运行可能仍在进行中（日志需运行结束后才生成）。请 sleep 几秒后再试，或先用 workflow_runs 确认它已结束。",
+            error: "日志尚不可用：该次运行可能仍在进行中（日志需运行结束后才生成）。请 wait_workflow 或稍等几秒后再试。",
           },
           409,
         );
       }
+      const live = await ghRunJobLogs(env, repo, headers, id, false);
+      if (live) return json({ ok: true, id, running: false, live: true, name: runName, status: runStatus, text: live });
       const detail = await res.text().catch(() => "");
       return json({ ok: false, error: "获取日志失败 github error " + res.status, detail: detail.slice(0, 300) }, 502);
     }
@@ -3109,9 +3147,52 @@ async function handleBuildLog(env: Bindings, runId: string, workflow?: string): 
     const max = 200000;
     const truncated = text.length > max;
     if (truncated) text = "...(日志过长，已截断，仅保留末尾)\n" + text.slice(-max);
-    return json({ ok: true, id, truncated, text });
+    return json({ ok: true, id, running: false, name: runName, status: runStatus, conclusion: runConclusion, truncated, text });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
+  }
+}
+
+// 拉取一次运行里所有 job 的实时日志（/actions/jobs/{id}/logs 返回纯文本，运行中也可用）。
+// 输出：每个 job 一段（步骤状态清单 + 日志正文）；running=false 时仅作兜底（zip 拉取失败时用）。
+async function ghRunJobLogs(
+  env: Bindings,
+  repo: string,
+  headers: Record<string, string>,
+  runId: string,
+  running: boolean,
+): Promise<string | null> {
+  try {
+    const jr = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${runId}/jobs?per_page=30`, { headers });
+    if (!jr.ok) return null;
+    const jd = (await jr.json()) as any;
+    const jobs = ((jd.jobs || []) as any[]).slice(0, 8);
+    if (!jobs.length) return null;
+    const dec = new TextDecoder();
+    const parts: string[] = [];
+    for (const job of jobs) {
+      const steps = ((job.steps || []) as any[])
+        .map((s: any) => "  [" + (s.conclusion || s.status || "?") + "] " + (s.name || ""))
+        .join("\n");
+      let body = "";
+      const lr = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${job.id}/logs`, { headers });
+      if (lr.ok) {
+        const t = dec.decode(await lr.arrayBuffer());
+        const max = 100000;
+        body = t.length > max ? "...(该 job 日志过长，已截断，仅保留末尾)\n" + t.slice(-max) : t;
+      } else if (running) {
+        body = "（该 job 还没有产出日志）";
+      } else {
+        body = "（获取该 job 日志失败 github error " + lr.status + "）";
+      }
+      parts.push(
+        "===== [job] " + (job.name || job.id) + " · " + (job.status || "?") + (job.conclusion ? "/" + job.conclusion : "") +
+          " =====\n" + (steps ? steps + "\n\n" : "") + body,
+      );
+    }
+    return parts.join("\n\n");
+  } catch {
+    return null;
   }
 }
 
