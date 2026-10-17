@@ -2776,7 +2776,7 @@ async function initBuildStatus(){
   const r=await api(API_BASE+'/workflows/runs?limit=30');
   const d=r.data||{};
   if(!r.ok||!d||!d.ok) return;
-  const runs=recentRuns(d.runs||[]);
+  const runs=relevantRuns(d.runs||[]);
   if(activeRuns(runs).length){ showRunningBanner(runs); startBuildPoll(); return; }
   stopBuildPoll();
   const latest=runs[0]||null;
@@ -2789,6 +2789,14 @@ function recentRuns(runs){
   return (runs||[]).filter(function(r){
     const t=Date.parse((r&&r.created_at)||'');
     return isNaN(t)?true:t>=cut;
+  });
+}
+// 横幅只关心仓库里自己的工作流；GitHub Pages 在产物分支更新后自动跑的
+// 「pages build and deployment」（无 workflow 文件，name 固定）不单列显示，避免出现两条运行中
+function relevantRuns(runs){
+  return recentRuns(runs).filter(function(r){
+    if(r&&r.workflow) return true;
+    return !/pages build/i.test(String((r&&r.name)||''));
   });
 }
 // 当前所有处于运行/排队状态的工作流（可能同时跑多个，如克隆 + 更新 GitHub）
@@ -2923,7 +2931,7 @@ function startBuildPoll(){
     const r=await api(API_BASE+'/workflows/runs?limit=30');
     const d=r.data||{};
     if(!r.ok||!d.ok){ if(tries>=12) stopBuildPoll(); return; }
-    const runs=recentRuns(d.runs||[]);
+    const runs=relevantRuns(d.runs||[]);
     if(activeRuns(runs).length){ showRunningBanner(runs, '（已等待约 '+(tries*5)+' 秒）'); return; }
     stopBuildPoll();
     const latest=runs[0]||null;
@@ -4065,50 +4073,48 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 订阅管理（SMTP + 订阅者 + 群发；订阅设置(邮件模板)仍在「设置」页） -->
+  <!-- 订阅管理（SMTP + 订阅者 + 群发 + 邮件模板，全部集中在本页） -->
   <div id="page-subscribe" class="${pageCls("subscribe")}">
-    <details class="wk-collapse">
-      <summary>SMTP 邮件服务器</summary>
-      <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">用于发送订阅确认与群发邮件。<b>Workers 仅支持 465 端口（隐式 TLS）</b>；QQ/163 等邮箱请填写「授权码」而非登录密码。</p>
-        <div class="wk-row">
-          <div style="flex:2">
-            <label class="wk-label">SMTP 服务器</label>
-            <input class="wk-input" id="smHost" placeholder="smtp.qq.com">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">端口</label>
-            <input class="wk-input" id="smPort" type="number" value="465" placeholder="465">
-          </div>
+    <div class="wk-card">
+      <h3 class="wk-title">SMTP 邮件服务器</h3>
+      <p class="wk-label" style="margin-top:0">用于发送订阅确认与群发邮件。<b>Workers 仅支持 465 端口（隐式 TLS）</b>；QQ/163 等邮箱请填写「授权码」而非登录密码。</p>
+      <div class="wk-row">
+        <div style="flex:2">
+          <label class="wk-label">SMTP 服务器</label>
+          <input class="wk-input" id="smHost" placeholder="smtp.qq.com">
         </div>
-        <div class="wk-row">
-          <div style="flex:1">
-            <label class="wk-label">用户名</label>
-            <input class="wk-input" id="smUser" placeholder="you@qq.com">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">密码 / 授权码</label>
-            <input class="wk-input" id="smPass" type="password" placeholder="留空表示不修改">
-          </div>
+        <div style="flex:1">
+          <label class="wk-label">端口</label>
+          <input class="wk-input" id="smPort" type="number" value="465" placeholder="465">
         </div>
-        <div class="wk-row">
-          <div style="flex:1">
-            <label class="wk-label">发件人名称</label>
-            <input class="wk-input" id="smFromName" placeholder="我的博客">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">发件人邮箱（默认同用户名）</label>
-            <input class="wk-input" id="smFromEmail" placeholder="you@qq.com">
-          </div>
-        </div>
-        <div class="filters" style="margin:14px 0 0">
-          <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存 SMTP 配置</button>
-          <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
-          <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
-        </div>
-        <div class="msg" id="smtpMsg"></div>
       </div>
-    </details>
+      <div class="wk-row">
+        <div style="flex:1">
+          <label class="wk-label">用户名</label>
+          <input class="wk-input" id="smUser" placeholder="you@qq.com">
+        </div>
+        <div style="flex:1">
+          <label class="wk-label">密码 / 授权码</label>
+          <input class="wk-input" id="smPass" type="password" placeholder="留空表示不修改">
+        </div>
+      </div>
+      <div class="wk-row">
+        <div style="flex:1">
+          <label class="wk-label">发件人名称</label>
+          <input class="wk-input" id="smFromName" placeholder="我的博客">
+        </div>
+        <div style="flex:1">
+          <label class="wk-label">发件人邮箱（默认同用户名）</label>
+          <input class="wk-input" id="smFromEmail" placeholder="you@qq.com">
+        </div>
+      </div>
+      <div class="filters" style="margin:14px 0 0">
+        <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存 SMTP 配置</button>
+        <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
+        <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
+      </div>
+      <div class="msg" id="smtpMsg"></div>
+    </div>
 
     <div class="wk-card">
       <h3 class="wk-title">订阅者</h3>
@@ -4153,6 +4159,45 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         <button class="wk-btn sm" onclick="broadcastSubscribe()">发送给全部已确认订阅者</button>
         <span class="wk-label" style="margin:0;align-self:center">单次上限 100 封</span>
       </div>
+    </div>
+
+    <div class="wk-card">
+      <h3 class="wk-title">订阅设置（邮件模板）</h3>
+      <div class="wk-row">
+        <div style="flex:1">
+          <label class="wk-label">站点名称</label>
+          <input class="wk-input" id="smSiteName" placeholder="我的博客">
+        </div>
+        <div style="flex:1">
+          <label class="wk-label">站点地址</label>
+          <input class="wk-input" id="smSiteUrl" placeholder="https://blog.example.com">
+        </div>
+      </div>
+      <label class="wk-label">确认邮件主题</label>
+      <input class="wk-input" id="smSubject">
+      <label class="wk-label">确认邮件正文（HTML，支持 {{site}} {{email}} {{link}} {{unsubscribe}}）</label>
+      <textarea class="wk-input" id="smBody" rows="6"></textarea>
+      <label class="wk-label" style="margin-top:14px">新文章通知主题（发布新文章并构建完成后自动发送）</label>
+      <input class="wk-input" id="smNotifySubject">
+      <label class="wk-label">新文章通知正文（HTML，支持 {{site}} {{title}} {{url}} {{unsubscribe}}）</label>
+      <textarea class="wk-input" id="smNotifyBody" rows="6"></textarea>
+      <label class="wk-label" style="margin-top:14px">退订成功提示主题（用户主动点邮件里的退订链接后发送）</label>
+      <input class="wk-input" id="smUnsubSubject">
+      <label class="wk-label">退订成功提示正文（HTML，支持 {{site}} {{email}}）</label>
+      <textarea class="wk-input" id="smUnsubBody" rows="4"></textarea>
+      <p class="wk-label" style="margin:6px 0 0;line-height:1.7">所有通知/群发邮件都会自动带上「取消订阅」按钮；只有订阅人自己点退订链接才会收到这封提示邮件，后台删除订阅者不会发送。</p>
+      <label class="wk-label" style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
+        <input type="checkbox" id="smNeedConfirm" style="width:auto"> 需要邮件确认（关闭后提交即订阅成功）
+      </label>
+      <div class="filters" style="margin:12px 0 0;align-items:center">
+        <span class="wk-label" style="margin:0">当日最多订阅量</span>
+        <input class="wk-input" id="smDailyLimit" type="number" min="1" max="1000000" style="width:130px" placeholder="100">
+        <span class="wk-label" style="margin:0">（按东八区计日，达到后当天不再接受新订阅，防刷）</span>
+      </div>
+      <div class="filters" style="margin:14px 0 0">
+        <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存配置</button>
+      </div>
+      <div class="msg" id="subMsg"></div>
     </div>
   </div>
 
@@ -4218,7 +4263,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 设置（各分区可展开/收起：后台设置[外观主题+工作流+站点功能]、订阅设置、API 说明；SMTP 在「订阅管理」页） -->
+  <!-- 设置（后台设置[外观+工作流+站点功能]、AI 设置、密钥管理、API 说明；订阅相关配置都在「订阅管理」页） -->
   <div id="page-settings" class="${pageCls("settings")}">
     <details class="wk-collapse">
       <summary>后台设置</summary>
@@ -4268,47 +4313,6 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         </div>
         <div class="msg" id="adminMsg"></div>
         <div class="msg" id="siteMsg"></div>
-      </div>
-    </details>
-
-    <details class="wk-collapse">
-      <summary>订阅设置（邮件模板）</summary>
-      <div class="wk-collapse-body">
-        <div class="wk-row">
-          <div style="flex:1">
-            <label class="wk-label">站点名称</label>
-            <input class="wk-input" id="smSiteName" placeholder="我的博客">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">站点地址</label>
-            <input class="wk-input" id="smSiteUrl" placeholder="https://blog.example.com">
-          </div>
-        </div>
-        <label class="wk-label">确认邮件主题</label>
-        <input class="wk-input" id="smSubject">
-        <label class="wk-label">确认邮件正文（HTML，支持 {{site}} {{email}} {{link}} {{unsubscribe}}）</label>
-        <textarea class="wk-input" id="smBody" rows="6"></textarea>
-        <label class="wk-label" style="margin-top:14px">新文章通知主题（发布新文章并构建完成后自动发送）</label>
-        <input class="wk-input" id="smNotifySubject">
-        <label class="wk-label">新文章通知正文（HTML，支持 {{site}} {{title}} {{url}} {{unsubscribe}}）</label>
-        <textarea class="wk-input" id="smNotifyBody" rows="6"></textarea>
-        <label class="wk-label" style="margin-top:14px">退订成功提示主题（用户主动点邮件里的退订链接后发送）</label>
-        <input class="wk-input" id="smUnsubSubject">
-        <label class="wk-label">退订成功提示正文（HTML，支持 {{site}} {{email}}）</label>
-        <textarea class="wk-input" id="smUnsubBody" rows="4"></textarea>
-        <p class="wk-label" style="margin:6px 0 0;line-height:1.7">所有通知/群发邮件都会自动带上「取消订阅」按钮；只有订阅人自己点退订链接才会收到这封提示邮件，后台删除订阅者不会发送。</p>
-        <label class="wk-label" style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
-          <input type="checkbox" id="smNeedConfirm" style="width:auto"> 需要邮件确认（关闭后提交即订阅成功）
-        </label>
-        <div class="filters" style="margin:12px 0 0;align-items:center">
-          <span class="wk-label" style="margin:0">当日最多订阅量</span>
-          <input class="wk-input" id="smDailyLimit" type="number" min="1" max="1000000" style="width:130px" placeholder="100">
-          <span class="wk-label" style="margin:0">（按东八区计日，达到后当天不再接受新订阅，防刷）</span>
-        </div>
-        <div class="filters" style="margin:14px 0 0">
-          <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存配置</button>
-        </div>
-        <div class="msg" id="subMsg"></div>
       </div>
     </details>
 

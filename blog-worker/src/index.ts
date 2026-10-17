@@ -3436,14 +3436,16 @@ async function handleSwitchTheme(env: Bindings, body: any): Promise<Response> {
     const saved = await handleSaveFile(env, { path: "_config.yml", content: next, branch });
     const savedData = (await saved.json().catch(() => ({}))) as any;
     if (!savedData.ok) return json({ ok: false, error: savedData.error || "保存 _config.yml 失败" }, 502);
-    // 触发部署让新主题生效
-    const build = await handleTriggerBuild(env);
-    const buildData = (await build.json().catch(() => ({}))) as any;
+    // 只触发「更新 GitHub Pages」工作流重建站点（不跑完整部署）
+    const disp = await fetch(
+      `https://api.github.com/repos/${repo}/actions/workflows/update-gh.yml/dispatches`,
+      { method: "POST", headers, body: JSON.stringify({ ref: branch }) },
+    ).catch(() => null);
     return json({
       ok: true,
       theme: name,
-      build_triggered: !!buildData.ok,
-      message: "已切换主题为 " + name + "，正在重新部署站点",
+      build_triggered: !!disp && disp.ok,
+      message: "已切换主题为 " + name + "，正在更新 GitHub Pages",
     });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
