@@ -5,7 +5,9 @@
 </p>
 <script>
 (function () {
-    var API = ('<%- theme.visit_counter.api || config.url %>' || '').replace(/\/+$/, '');
+    // 访问量接口地址：固定用「当前浏览器访问的地址」+/api（页面部署在哪个域名就上报到哪个域名，
+    // 不再取构建时写死的站点 url）；浏览器拿不到 origin 时才回退到主题/站点配置
+    var API = (window.location.origin || '<%- theme.visit_counter.api || config.url %>' || '').replace(/\/+$/, '');
     if (!API) { return; }
     function render(d) {
         if (!d) { return; }

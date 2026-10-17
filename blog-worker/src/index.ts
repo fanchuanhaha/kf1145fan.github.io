@@ -327,14 +327,17 @@ app.delete("/admin/api/post", async (c) => {
   const path = c.req.query("path") || "";
   if (!path) return json({ error: "path required" }, 400);
   const r = await handleRecyclePaths(c.env as Bindings, [path]);
-  return json({ ...r, message: r.moved ? "已移入回收站" : "" });
+  const build = r.moved > 0 ? await afterContentChange(c.env as Bindings) : {};
+  return json({ ...r, ...build, message: r.moved ? "已移入回收站" : "" });
 });
 
 // 批量删除文章（移入回收站）：POST /admin/api/posts/delete  body { paths: string[] }
 app.post("/admin/api/posts/delete", async (c) => {
   if (!isAdmin(c.get("userInfo"))) return json({ error: "unauthorized" }, 401);
   const body = (await c.req.json().catch(() => ({}))) as { paths?: unknown };
-  return json(await handleRecyclePaths(c.env as Bindings, body.paths));
+  const r = await handleRecyclePaths(c.env as Bindings, body.paths);
+  const build = r.moved > 0 ? await afterContentChange(c.env as Bindings) : {};
+  return json({ ...r, ...build });
 });
 
 // 批量上传文章：POST /admin/api/posts/upload  body { files: [{name, content}] }
@@ -468,12 +471,26 @@ async function setSiteSetting(db: D1Database, key: string, value: string): Promi
     .run();
 }
 
+// 工作流触发模式（后台「设置 → 后台设置」）：auto=发文/删文后自动运行工作流；manual=只推 GitHub，等管理员手动运行
+async function workflowModeOf(env: Bindings): Promise<"auto" | "manual"> {
+  try {
+    return (await getSiteSetting(env.DB, "workflow_mode", "auto")) === "manual" ? "manual" : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
 app.get("/admin/api/site/settings", async (c) => {
   if (!isAdmin(c.get("userInfo"))) return json({ error: "unauthorized" }, 401);
   const db = (c.env as Bindings).DB;
   try {
     const allowGuest = (await getSiteSetting(db, "allow_guest_comment", "true")) !== "false";
-    return json({ ok: true, allow_guest_comment: allowGuest, retention_days: await visitRetention(db) });
+    return json({
+      ok: true,
+      allow_guest_comment: allowGuest,
+      retention_days: await visitRetention(db),
+      workflow_mode: await workflowModeOf(c.env as Bindings),
+    });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
   }
@@ -494,8 +511,16 @@ app.put("/admin/api/site/settings", async (c) => {
       }
       await setSiteSetting(db, "visit_retention_days", String(n));
     }
+    if (body.workflow_mode !== undefined) {
+      await setSiteSetting(db, "workflow_mode", body.workflow_mode === "manual" ? "manual" : "auto");
+    }
     const allowGuest = (await getSiteSetting(db, "allow_guest_comment", "true")) !== "false";
-    return json({ ok: true, allow_guest_comment: allowGuest, retention_days: await visitRetention(db) });
+    return json({
+      ok: true,
+      allow_guest_comment: allowGuest,
+      retention_days: await visitRetention(db),
+      workflow_mode: await workflowModeOf(c.env as Bindings),
+    });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
   }
@@ -2293,6 +2318,8 @@ app.get("/admin", (c) => adminPage(c, "manage"));
 app.get("/admin/", (c) => adminPage(c, "manage"));
 app.get("/admin/manage", (c) => adminPage(c, "manage"));
 app.get("/admin/manage/", (c) => adminPage(c, "manage"));
+app.get("/admin/upload", (c) => adminPage(c, "upload"));
+app.get("/admin/upload/", (c) => adminPage(c, "upload"));
 app.get("/admin/write", (c) => adminPage(c, "write"));
 app.get("/admin/write/", (c) => adminPage(c, "write"));
 app.get("/admin/comments", (c) => adminPage(c, "comments"));
@@ -2437,6 +2464,31 @@ async function handleGetPost(env: Bindings, path: string): Promise<Response> {
   }
 }
 
+// ---------- 内容变更后是否自动运行工作流（后台「设置 → 后台设置 → 工作流触发模式」）----------
+// auto：发文/删文/批量上传后自动触发 update-gh.yml 重建站点（新文章构建完成后通知订阅者）；
+// manual：只推送到 GitHub，返回 need_workflow，由前端在日志位置提示管理员去运行工作流。
+async function afterContentChange(
+  env: Bindings,
+  opts: { notify?: boolean; postTitle?: string; postUrl?: string } = {},
+): Promise<{ workflow_mode: "auto" | "manual"; build_triggered?: boolean; need_workflow?: boolean }> {
+  const mode = await workflowModeOf(env);
+  if (mode === "manual") return { workflow_mode: "manual", need_workflow: true };
+  const { repo, branch, headers } = ghConfig(env);
+  const payload: { ref: string; inputs?: Record<string, string> } = { ref: branch };
+  if (opts.notify) {
+    payload.inputs = {
+      notify: "true",
+      post_title: opts.postTitle || "",
+      post_url: opts.postUrl || "",
+    };
+  }
+  const disp = await fetch(
+    `https://api.github.com/repos/${repo}/actions/workflows/update-gh.yml/dispatches`,
+    { method: "POST", headers, body: JSON.stringify(payload) },
+  ).catch(() => null);
+  return { workflow_mode: "auto", build_triggered: !!disp && disp.ok };
+}
+
 async function handleWritePost(
   env: Bindings,
   body: any,
@@ -2490,13 +2542,37 @@ async function handleWritePost(
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return json({ ok: false, error: "github error: " + (data as any).message || res.status }, 502);
 
-    // 发布/更新文章默认只推送到 GitHub，不自动触发重建（避免每次都跑一整轮部署）。
-    // 需要更新站点时，由管理员在「部署记录」点「手动运行工作流」，或用 AI 的 trigger_workflow 触发。
+    // 发布/更新文章后按「工作流触发模式」处理（设置 → 后台设置）：
+    // auto=自动触发 update-gh.yml 重建站点（新文章构建完通知订阅者）；manual=只推 GitHub，由前端提示运行工作流。
+    let postUrl = path;
+    if (!isUpdate) {
+      const pagesUrl = (env.SITE_URL || "").trim().replace(/\/+$/, "") || pagesBaseUrl(env);
+      const pageTitle = filename.replace(/\.md$/, "");
+      postUrl = pagesUrl
+        ? pagesUrl +
+          "/" +
+          (date.replace(/-/g, "/") + "/" + pageTitle)
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/") +
+          "/"
+        : path;
+    }
+    const build = await afterContentChange(
+      env,
+      isUpdate ? {} : { notify: true, postTitle: title, postUrl },
+    );
     return json({
       ok: true,
       path,
       filename,
-      message: "已提交并推送到 GitHub，如需更新站点请点「运行工作流」",
+      ...build,
+      message:
+        build.workflow_mode === "manual"
+          ? "已提交并推送到 GitHub，需运行工作流才会更新站点"
+          : isUpdate
+            ? "已提交，工作流会自动重建博客"
+            : "已提交，正在构建博客；构建完成后会自动邮件通知订阅者",
     });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
@@ -2826,7 +2902,8 @@ async function handleUploadPosts(env: Bindings, files: unknown): Promise<Respons
     }
   }
   const created = results.filter((r) => r.ok).length;
-  return json({ ok: created > 0, created, total: results.length, results });
+  const build = created > 0 ? await afterContentChange(env) : {};
+  return json({ ok: created > 0, created, total: results.length, results, ...build });
 }
 
 // ---------- front matter 解析（逐行，稳健）----------

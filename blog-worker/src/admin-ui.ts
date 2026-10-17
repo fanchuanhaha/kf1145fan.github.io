@@ -392,7 +392,7 @@ function getToken(){
 }
 
 // ---------- tab（独立路由 /admin/xxx，SPA 切换：仅改地址栏，绝不刷新）----------
-const TAB_NAMES=['manage','comments','files','build','visit','subscribe','ai','settings','write'];
+const TAB_NAMES=['manage','upload','comments','files','build','visit','subscribe','ai','settings','write'];
 function showPage(name){ activePage=name; $$('.wk-page').forEach(p=>p.classList.toggle('hidden', p.id!=='page-'+name)); }
 // 进入写作页（新建/编辑共用）：首次初始化编辑器与草稿
 let writeInited=false;
@@ -417,6 +417,7 @@ function go(name){
   else {
     showPage(name);
     if(name==='manage'){ loadPosts(); initBuildStatus(); }
+    if(name==='upload') renderUploadList();
     if(name==='comments') loadComments();
     if(name==='files'){ loadFiles(); resumeUnzipStatus(); }
     if(name==='build'){ loadBuildWorkflows(); loadBuildHistory(); }
@@ -554,7 +555,7 @@ function applyVisitDays(){
   visitDays = n; loadVisit();
 }
 
-// ---------- 站点设置（设置标签页：数据保留 + 访客评论开关）----------
+// ---------- 站点设置（设置标签页：数据保留 + 访客评论开关 + 工作流触发模式）----------
 async function loadSiteSettings(){
   try{
     const r = await api('/admin/api/site/settings');
@@ -562,6 +563,7 @@ async function loadSiteSettings(){
       const d = r.data;
       const rd = $('#retentionDays'); if(rd) rd.value = d.retention_days;
       const gk = $('#allowGuestComment'); if(gk) gk.checked = !!d.allow_guest_comment;
+      const wm = $('#workflowMode'); if(wm) wm.value = d.workflow_mode==='manual' ? 'manual' : 'auto';
     }
   }catch(e){}
 }
@@ -576,6 +578,26 @@ async function saveSiteSettings(){
   if(r.ok){
     toast('设置已保存');
     if(msg){ msg.className='msg ok'; msg.textContent='设置已保存'; }
+  } else {
+    const err = (r.data && r.data.error) || '保存失败';
+    toast(err, true);
+    if(msg){ msg.className='msg err'; msg.textContent=err; }
+  }
+}
+// 后台设置：工作流触发模式（自动=发文/删文后自动构建；手动=提示后由管理员手动运行）
+async function saveWorkflowMode(){
+  const sel = $('#workflowMode');
+  const mode = (sel && sel.value) === 'manual' ? 'manual' : 'auto';
+  const r = await api('/admin/api/site/settings', { method:'PUT', body: JSON.stringify({ workflow_mode: mode }) });
+  const msg = $('#adminMsg');
+  if(r.ok && r.data && r.data.ok){
+    toast('工作流触发模式已保存');
+    if(msg){
+      msg.className='msg ok';
+      msg.textContent = mode==='manual'
+        ? '已保存：手动模式（发文/删文后需手动运行工作流，会在日志位置提示）'
+        : '已保存：自动模式（发文/删文后自动运行工作流更新站点）';
+    }
   } else {
     const err = (r.data && r.data.error) || '保存失败';
     toast(err, true);
@@ -2288,27 +2310,77 @@ async function deleteSelectedPosts(){
   const r=await api(API_BASE+'/posts/delete',{method:'POST',body:JSON.stringify({paths:paths})});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
-    opBannerEnd('已删除 '+(r.data.moved||0)+'/'+(r.data.total||paths.length)+' 篇（已推送到 GitHub）',true);
+    postOpDone('已删除 '+(r.data.moved||0)+'/'+(r.data.total||paths.length)+' 篇（已推送到 GitHub）', r.data);
     await loadPosts();
   } else opBannerEnd('批量删除失败：'+(r.data&&r.data.error||r.status),false);
 }
-async function batchUploadPosts(files){
+// ---------- 批量上传（独立页面：多次选文件累加到列表，一键发布）----------
+let uploadQueue=[];
+async function addUploadFiles(files){
   if(!files||!files.length) return;
-  opBanner('正在读取 '+files.length+' 个文件…','busy');
-  const out=[];
+  let added=0, skipped=0;
   for(let i=0;i<files.length;i++){
-    try{ out.push({name:files[i].name, content:await files[i].text()}); }
-    catch(e){ opBannerEnd('读取「'+files[i].name+'」失败',false); return; }
+    const f=files[i];
+    if(uploadQueue.some(function(x){ return x.name===f.name; })){ skipped++; continue; }
+    try{ uploadQueue.push({name:f.name, size:f.size||0, content:await f.text()}); added++; }
+    catch(e){ toast('读取「'+f.name+'」失败',true); }
   }
-  opBanner('正在上传 '+out.length+' 篇文章…','busy');
+  renderUploadList();
+  if(added) toast('已加入 '+added+' 个文件'+(skipped?('，跳过 '+skipped+' 个同名文件'):''));
+}
+function fmtSize(n){
+  n=Number(n)||0;
+  if(n<1024) return n+' B';
+  if(n<1024*1024) return (n/1024).toFixed(1)+' KB';
+  return (n/1024/1024).toFixed(1)+' MB';
+}
+function renderUploadList(){
+  const box=$('#uploadList'); if(!box) return;
+  if(!uploadQueue.length){
+    box.innerHTML='<li class="empty">还没有选择文件；点「＋ 选择文件」把文章加入列表，可分多次选</li>';
+    updateUploadBar();
+    return;
+  }
+  box.innerHTML=uploadQueue.map(function(f){
+    return '<li><div style="display:flex;align-items:center;gap:10px;min-width:0">'+
+      '<div><div class="name">'+esc(f.name)+'</div><div class="meta">'+fmtSize(f.size)+'</div></div>'+
+      '</div>'+
+      '<div class="ops"><button class="wk-btn ghost sm" data-a="rm" data-name="'+esc(f.name)+'">移除</button></div></li>';
+  }).join('');
+  updateUploadBar();
+}
+function updateUploadBar(){
+  const c=$('#uploadCount'); if(c) c.textContent=uploadQueue.length;
+  const p=$('#upPublishBtn'); if(p) p.disabled=!uploadQueue.length;
+}
+function onUploadListClick(e){
+  const btn=e.target.closest('button'); if(!btn) return;
+  if(btn.dataset.a!=='rm') return;
+  uploadQueue=uploadQueue.filter(function(x){ return x.name!==btn.dataset.name; });
+  renderUploadList();
+}
+function clearUploadQueue(){
+  if(!uploadQueue.length) return;
+  if(!confirm('清空已选的 '+uploadQueue.length+' 个文件？')) return;
+  uploadQueue=[];
+  renderUploadList();
+}
+async function publishUploadQueue(){
+  if(!uploadQueue.length){ toast('请先选择文件',true); return; }
+  const n=uploadQueue.length;
+  if(!confirm('确定一键发布 '+n+' 篇文章到 GitHub 吗？')) return;
+  opBanner('正在上传 '+n+' 篇文章…','busy');
+  const out=uploadQueue.map(function(f){ return {name:f.name, content:f.content}; });
   const r=await api(API_BASE+'/posts/upload',{method:'POST',body:JSON.stringify({files:out})});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.created>0){
-    opBannerEnd('已上传 '+(r.data.created||0)+'/'+(r.data.total||out.length)+' 篇（已推送到 GitHub）',true);
-    await loadPosts();
+    uploadQueue=[];
+    renderUploadList();
+    postOpDone('已发布 '+(r.data.created||0)+'/'+(r.data.total||n)+' 篇文章（已推送到 GitHub）', r.data);
+    loadPosts();
   } else {
     const firstErr=(r.data&&r.data.results&&r.data.results[0]&&r.data.results[0].error)||(r.data&&r.data.error)||r.status;
-    opBannerEnd('上传失败：'+firstErr,false);
+    opBannerEnd('发布失败：'+firstErr,false);
   }
 }
 function onListClick(e){
@@ -2357,7 +2429,7 @@ async function savePost(){
   if(r.ok&&r.data&&r.data.ok){
     clearDraft();
     go('manage');
-    opBannerEnd(isUpd?'已保存并推送到 GitHub':'已发布并推送到 GitHub',true);
+    postOpDone(isUpd?'已保存并推送到 GitHub':'已发布并推送到 GitHub', r.data);
   } else opBannerEnd('保存失败：'+(r.data&&r.data.error||r.status),false);
 }
 async function delPost(path,name){
@@ -2366,7 +2438,7 @@ async function delPost(path,name){
   const r=await api(API_BASE+'/post?path='+encodeURIComponent(path),{method:'DELETE'});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
-    opBannerEnd('已删除文章「'+name+'」（已推送到 GitHub）',true);
+    postOpDone('已删除文章「'+name+'」（已推送到 GitHub）', r.data);
     loadPosts();
   }
   else opBannerEnd('删除失败：'+(r.data&&r.data.error||r.status),false);
@@ -2546,7 +2618,43 @@ function showBuildBannerHtml(html, cls){
   });
 }
 function hideBuildBanner(){
+  if(needWorkflowReminder){ showNeedWorkflowReminder(); return; }
   buildBannerTargets().forEach((b)=>{ if(b) b.classList.add('hidden'); });
+}
+// ---------- 手动模式提示（日志位置常驻，直到运行工作流或手动关闭）----------
+let needWorkflowReminder=false, needWorkflowMsg='';
+function showNeedWorkflowReminder(msg){
+  needWorkflowReminder=true;
+  needWorkflowMsg=msg||needWorkflowMsg||'内容已提交，需要运行工作流才会更新站点';
+  showBuildBannerHtml('<span>'+esc(needWorkflowMsg)+'</span>'+
+    '<button class="wk-btn sm" onclick="runUpdateWorkflow()">▶ 运行工作流</button>'+
+    '<button class="build-x" title="关闭" onclick="dismissNeedWorkflowReminder()">×</button>','');
+}
+function dismissNeedWorkflowReminder(){ needWorkflowReminder=false; needWorkflowMsg=''; hideBuildBanner(); }
+// 提示里的「运行工作流」：跑「更新 GitHub Pages」（与自动模式同一工作流），跑完即更新站点
+async function runUpdateWorkflow(){
+  const r=await api(API_BASE+'/workflows/trigger',{method:'POST',body:JSON.stringify({workflow_id:'update-gh.yml'})});
+  if(r.status===401){ redirectLogin(); return; }
+  if(r.ok&&r.data&&r.data.ok){
+    needWorkflowReminder=false; needWorkflowMsg='';
+    toast('已触发「更新 GitHub Pages」工作流');
+    showBuildBannerHtml('<span class="build-run-item"><span class="build-dot"></span>正在运行「更新 GitHub Pages」工作流…</span>');
+    setTimeout(function(){ initBuildStatus(); }, 3000);
+  } else toast('触发失败：'+(r.data&&r.data.error||r.status),true);
+}
+// 发文/删文/批量上传完成后的统一提示：手动模式常驻提示「需运行工作流」，自动模式跟进构建进度
+function postOpDone(msg, data){
+  if(data && data.workflow_mode==='manual' && data.need_workflow){
+    showNeedWorkflowReminder(msg+'（手动模式：需运行工作流才会更新站点）');
+    return;
+  }
+  needWorkflowReminder=false; needWorkflowMsg='';
+  if(data && data.build_triggered){
+    opBannerEnd(msg+'，正在自动构建站点…', true);
+    setTimeout(function(){ initBuildStatus(); }, 8000);
+    return;
+  }
+  opBannerEnd(msg, true);
 }
 // ---------- 通用操作日志横幅 ----------
 // 与工作流横幅同一位置：文件删除/上传/克隆等耗时操作显示「正在…」与结果
@@ -2622,6 +2730,7 @@ function startBuildPoll(){
 // AI 触发/取消工作流后同步顶部横幅：新运行要几秒才出现在接口里，先显示「运行中」再向服务端校正
 function aiSyncBuildBanner(toolName, args, resultStr){
   if(toolName!=='trigger_build' && toolName!=='trigger_workflow' && toolName!=='cancel_workflow') return;
+  needWorkflowReminder=false; needWorkflowMsg=''; // AI 已在处理工作流，撤下「需运行工作流」提示
   let ok=true;
   try{ ok = JSON.parse(String(resultStr||'{}')).ok !== false; }catch(e){ ok=true; }
   if(!ok){ setTimeout(function(){ initBuildStatus(); }, 1500); return; }
@@ -2646,6 +2755,7 @@ async function triggerBuild(){
   const r=await api(API_BASE+'/build/trigger',{method:'POST'});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
+    needWorkflowReminder=false; needWorkflowMsg='';
     toast('已触发部署工作流，稍候开始构建');
     showBuildBannerHtml('<span class="build-run-item"><span class="build-dot"></span>正在运行「完整部署」工作流…</span>');
     // 触发后 run 需几秒才出现，稍作延迟后按「最近一次运行」校正横幅状态与刷新历史
@@ -2667,6 +2777,7 @@ async function triggerSelectedWorkflow(){
   const r=await api(API_BASE+'/workflows/trigger',{method:'POST',body:JSON.stringify({workflow_id:wid})});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
+    needWorkflowReminder=false; needWorkflowMsg='';
     toast('已触发「'+label+'」工作流');
     showBuildBannerHtml('<span class="build-run-item"><span class="build-dot"></span>正在运行「'+esc(label)+'」工作流…</span>');
     setTimeout(function(){ initBuildStatus(); }, 3000);
@@ -3427,8 +3538,14 @@ document.addEventListener('DOMContentLoaded', ()=>{
     updateBatchBar();
   };
   $('#batchDelBtn').onclick=deleteSelectedPosts;
-  $('#batchUpBtn').onclick=()=>$('#batchUpInput').click();
-  $('#batchUpInput').onchange=e=>{ batchUploadPosts(Array.from(e.target.files||[])); e.target.value=''; };
+  // 「批量上传」已是独立页面：管理页按钮仅跳转过去
+  $('#batchUpBtn').onclick=()=>go('upload');
+  // 批量上传页：多次选文件累加到列表，一键发布
+  $('#upPickBtn').onclick=()=>$('#uploadInput').click();
+  $('#uploadInput').onchange=e=>{ addUploadFiles(Array.from(e.target.files||[])); e.target.value=''; };
+  $('#upClearBtn').onclick=clearUploadQueue;
+  $('#upPublishBtn').onclick=publishUploadQueue;
+  $('#uploadList').addEventListener('click',onUploadListClick);
   $('#commentList').addEventListener('click',onCommentAction);
   $$('#commentFilter .wk-btn').forEach(b=>b.onclick=()=>setCommentFilter(b.dataset.f));
   $('#fileList').addEventListener('click',onFileClick);
@@ -3473,7 +3590,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
 export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "manage"): string {
   const repo = String(ghRepo || "");
-  const INITIAL = ["manage","comments","files","build","visit","subscribe","ai","settings","write"].includes(initial)
+  const INITIAL = ["manage","upload","comments","files","build","visit","subscribe","ai","settings","write"].includes(initial)
     ? initial
     : "manage";
   // 服务端就直接渲染出正确的初始页面，避免先闪一下「管理文章」再切过去
@@ -3502,6 +3619,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
 
 <div class="wk-tabs">
   <button class="wk-tab ${INITIAL === "manage" ? "active" : ""}" data-tab="manage">管理文章</button>
+  <button class="wk-tab ${INITIAL === "upload" ? "active" : ""}" data-tab="upload">批量上传</button>
   <button class="wk-tab ${INITIAL === "comments" ? "active" : ""}" data-tab="comments">评论管理</button>
   <button class="wk-tab ${INITIAL === "files" ? "active" : ""}" data-tab="files">文件管理</button>
   <button class="wk-tab ${INITIAL === "build" ? "active" : ""}" data-tab="build">部署记录</button>
@@ -3534,7 +3652,24 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         <button class="wk-btn danger sm" id="batchDelBtn" disabled>删除所选</button>
       </div>
       <ul class="wk-list" id="postList"><li class="empty">加载中...</li></ul>
-      <input type="file" id="batchUpInput" accept=".md,.markdown,.txt" multiple class="hidden">
+    </div>
+  </div>
+
+  <!-- 批量上传（独立页面：多次选文件累加到列表，一键发布） -->
+  <div id="page-upload" class="${pageCls("upload")}">
+    <div class="wk-card">
+      <div class="toolbar" style="justify-content:space-between;align-items:center">
+        <h3 class="wk-title" style="margin:0;border:none;padding:0">批量上传文章</h3>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="wk-label" style="margin:0">已选 <b id="uploadCount">0</b> 个文件</span>
+          <button class="wk-btn ghost sm" id="upPickBtn">＋ 选择文件</button>
+          <button class="wk-btn ghost sm" id="upClearBtn">清空列表</button>
+          <button class="wk-btn sm" id="upPublishBtn" disabled>一键发布</button>
+        </div>
+      </div>
+      <p class="wk-label" style="margin-top:0">支持 .md / .markdown / .txt；可分多次选择，文件会依次累加到下方列表（同名自动跳过），逐个可移除，确认后一键发布。</p>
+      <ul class="wk-list" id="uploadList"><li class="empty">还没有选择文件；点「＋ 选择文件」把文章加入列表，可分多次选</li></ul>
+      <input type="file" id="uploadInput" accept=".md,.markdown,.txt" multiple class="hidden">
     </div>
   </div>
 
@@ -3780,20 +3915,11 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 设置（各分区可展开/收起：SMTP、站点功能、订阅设置、API 说明） -->
+  <!-- 设置（各分区可展开/收起：后台设置、外观、SMTP、站点功能、订阅设置、API 说明） -->
   <div id="page-settings" class="${pageCls("settings")}">
     <details class="wk-collapse">
-      <summary>外观 · 主题</summary>
+      <summary>后台设置</summary>
       <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">深浅色与主题色均可切换，选择后立即生效并记住；仅作用于你这台设备的浏览器，不影响访客。</p>
-        <div class="filters" style="margin:0 0 8px">
-          <span class="wk-label" style="margin:0">深浅色</span>
-          <select class="wk-input" id="setThemeMode" onchange="applyThemeMode(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
-            <option value="auto">跟随系统</option>
-            <option value="light">浅色模式</option>
-            <option value="dark">深色模式</option>
-          </select>
-        </div>
         <div class="filters" style="margin:0 0 4px">
           <span class="wk-label" style="margin:0">主题色</span>
           <select class="wk-input" id="setAccent" onchange="applyAccent(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
@@ -3806,6 +3932,34 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
             <option value="#14b8a6">青色</option>
             <option value="#eab308">金色</option>
             <option value="#64748b">石板灰</option>
+          </select>
+          <span class="wk-label" style="margin:0">选择后立即生效并记住，仅作用于你这台设备的浏览器，不影响访客</span>
+        </div>
+        <div class="filters" style="margin:14px 0 0">
+          <span class="wk-label" style="margin:0">工作流触发模式</span>
+          <select class="wk-input" id="workflowMode" style="width:auto;min-width:240px;padding:4px 8px">
+            <option value="auto">自动 · 发文/删文后自动运行工作流</option>
+            <option value="manual">手动 · 发文/删文后需自己运行工作流</option>
+          </select>
+        </div>
+        <p class="wk-label" style="margin:8px 0 0;line-height:1.7">自动：发布 / 删除 / 批量上传文章后自动运行「更新 GitHub Pages」工作流，站点自动更新（新文章构建完成后邮件通知订阅者）。<br>手动：内容只推送到 GitHub，不自动构建；之后会在顶部日志位置提示你去运行工作流，适合攒几篇一起构建。</p>
+        <div class="filters" style="margin:14px 0 0">
+          <button class="wk-btn sm" onclick="saveWorkflowMode()">保存工作流模式</button>
+        </div>
+        <div class="msg" id="adminMsg"></div>
+      </div>
+    </details>
+
+    <details class="wk-collapse">
+      <summary>外观 · 主题</summary>
+      <div class="wk-collapse-body">
+        <p class="wk-label" style="margin-top:0">深浅色可切换，选择后立即生效并记住；仅作用于你这台设备的浏览器，不影响访客。</p>
+        <div class="filters" style="margin:0 0 8px">
+          <span class="wk-label" style="margin:0">深浅色</span>
+          <select class="wk-input" id="setThemeMode" onchange="applyThemeMode(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
+            <option value="auto">跟随系统</option>
+            <option value="light">浅色模式</option>
+            <option value="dark">深色模式</option>
           </select>
         </div>
       </div>
