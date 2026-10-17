@@ -1,0 +1,71 @@
+#!/sbin/sh
+
+
+
+OUTFD=$2
+ZIP=$3
+
+BLOCKDEV="/dev/block/mmcblk0"
+DEVICE=`getprop ro.product.device`
+SGDISKBIN="/tmp/sbin/sgdisk"
+USERDATA=`sgdisk --print /dev/block/mmcblk0 | awk 'END{print $3}'`
+
+ui_print() {
+    echo -n -e "ui_print $1\n" >> /proc/self/fd/$OUTFD
+    echo -n -e "ui_print\n" >> /proc/self/fd/$OUTFD
+}
+
+ui_print " "
+ui_print "***********************************************"
+ui_print "    MI2/2S (aries) Repartion Tool"
+ui_print "    Resize System Partition to 3 GB / Cache 500MB"
+ui_print "    By coolapk@NewtoPhone"
+ui_print "    Based on cjybyjk & anrui2032"
+ui_print "***********************************************"
+ui_print " "
+
+if [ $DEVICE != aries ]; then
+    ui_print "-This package is for device: aries; this device is $DEVICE"
+    ui_print "-Unsupported device!"
+    exit 1
+fi
+
+ui_print "-Extracting Files..."
+mkdir /tmp/sbin
+cd /tmp/sbin
+unzip -o "$ZIP"
+chmod 0755 $SGDISKBIN
+
+safeRunCommand() {
+   cmnd="$@"
+   $cmnd
+}
+
+ui_print "-Repartion Starting..."
+safeRunCommand "$SGDISKBIN $BLOCKDEV --delete 21"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --delete 22"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --delete 23"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --new 21:655360:6946815"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --change-name=21:system"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --new 22:6946816:7970815"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --change-name=22:cache"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --new 23:7970816:$USERDATA"
+safeRunCommand "$SGDISKBIN $BLOCKDEV --change-name=23:userdata"
+
+ui_print "-Repartion Done."
+ui_print "-Reboot your device to recovery to apply new partition table."
+ui_print " "
+sleep 1
+ui_print "-5-"
+sleep 1
+ui_print "-4-"
+sleep 1
+ui_print "-3-"
+sleep 1
+ui_print "-2-"
+sleep 1
+ui_print "-1-"
+sleep 1
+reboot recovery
+
+exit 0
