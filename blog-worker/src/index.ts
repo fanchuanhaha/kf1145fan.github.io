@@ -399,6 +399,17 @@ app.post("/admin/api/clone-repo", async (c) => {
   return handleCloneRepo(c.env as Bindings, await c.req.json().catch(() => ({})));
 });
 
+// 主题管理：列出 themes 目录主题 / 切换主题
+app.get("/admin/api/themes", async (c) => {
+  if (!isAdmin(c.get("userInfo"))) return json({ error: "unauthorized" }, 401);
+  return handleListThemes(c.env as Bindings);
+});
+
+app.post("/admin/api/themes/switch", async (c) => {
+  if (!isAdmin(c.get("userInfo"))) return json({ error: "unauthorized" }, 401);
+  return handleSwitchTheme(c.env as Bindings, await c.req.json().catch(() => ({})));
+});
+
 // ---------- 访问量（仅管理员可见）----------
 // 最近 N 天趋势：/admin/api/visit/daily?days=30
 app.get("/admin/api/visit/daily", async (c) => {
@@ -2332,6 +2343,8 @@ app.get("/admin/files", (c) => adminPage(c, "files"));
 app.get("/admin/files/", (c) => adminPage(c, "files"));
 app.get("/admin/build", (c) => adminPage(c, "build"));
 app.get("/admin/build/", (c) => adminPage(c, "build"));
+app.get("/admin/theme", (c) => adminPage(c, "theme"));
+app.get("/admin/theme/", (c) => adminPage(c, "theme"));
 app.get("/admin/visit", (c) => adminPage(c, "visit"));
 app.get("/admin/visit/", (c) => adminPage(c, "visit"));
 app.get("/admin/subscribe", (c) => adminPage(c, "subscribe"));
@@ -3340,6 +3353,97 @@ async function handleCloneRepo(env: Bindings, body: any): Promise<Response> {
       workflow: true,
       running: true,
       message: "已触发克隆工作流，正在把 " + repoUrl + " 克隆到 " + targetDir + "（约 10 秒完成）",
+    });
+  } catch (e) {
+    return json({ ok: false, error: String(e) }, 500);
+  }
+}
+
+// ---------- 主题管理 ----------
+// 列出 themes 目录下的主题：子文件夹含 _config.yml 或 layout/ 目录才算有效主题；
+// 同时读根目录 _config.yml 的 theme 字段作为当前主题
+async function handleListThemes(env: Bindings): Promise<Response> {
+  const { token, repo, headers, branch } = ghConfig(env);
+  if (!token) return json({ ok: false, error: "GH_TOKEN not configured" }, 500);
+  try {
+    let current = "";
+    const cfg = await fetch(
+      `https://api.github.com/repos/${repo}/contents/_config.yml?ref=${encodeURIComponent(branch)}`,
+      { headers },
+    );
+    if (cfg.ok) {
+      const d = (await cfg.json()) as any;
+      const raw = decodeURIComponent(escape(atob(d.content || "")));
+      const m = /^theme:\s*["']?([^\s"']+)["']?\s*$/m.exec(raw);
+      if (m) current = m[1];
+    }
+    const res = await fetch(
+      `https://api.github.com/repos/${repo}/contents/themes?ref=${encodeURIComponent(branch)}`,
+      { headers },
+    );
+    if (!res.ok) return json({ ok: false, error: "github error " + res.status }, 502);
+    const data = (await res.json()) as any[];
+    const dirs = (data || []).filter((f) => f.type === "dir").map((f) => String(f.name));
+    // 逐个校验目录是否为有效主题（并行请求）
+    const themes = await Promise.all(
+      dirs.map(async (name) => {
+        let valid = false;
+        try {
+          const enc = encodeURIComponent(name);
+          const a = await fetch(
+            `https://api.github.com/repos/${repo}/contents/themes/${enc}/_config.yml?ref=${encodeURIComponent(branch)}`,
+            { headers },
+          );
+          if (a.ok) valid = true;
+          else {
+            const b = await fetch(
+              `https://api.github.com/repos/${repo}/contents/themes/${enc}/layout?ref=${encodeURIComponent(branch)}`,
+              { headers },
+            );
+            valid = b.ok;
+          }
+        } catch {
+          /* ignore */
+        }
+        return { name, valid, current: name === current };
+      }),
+    );
+    return json({ ok: true, current, themes });
+  } catch (e) {
+    return json({ ok: false, error: String(e) }, 500);
+  }
+}
+
+// 切换主题：修改根目录 _config.yml 的 theme 字段，并触发部署工作流重建站点
+async function handleSwitchTheme(env: Bindings, body: any): Promise<Response> {
+  const { token, repo, headers, branch } = ghConfig(env);
+  if (!token) return json({ ok: false, error: "GH_TOKEN not configured" }, 500);
+  const name = String(body.name || "").trim().replace(/^\/+|\/+$/g, "");
+  if (!name || name.includes("..") || name.includes("/") || name.includes("\\"))
+    return json({ ok: false, error: "name required" }, 400);
+  try {
+    const cfg = await fetch(
+      `https://api.github.com/repos/${repo}/contents/_config.yml?ref=${encodeURIComponent(branch)}`,
+      { headers },
+    );
+    if (!cfg.ok) return json({ ok: false, error: "读取 _config.yml 失败 github error " + cfg.status }, 502);
+    const d = (await cfg.json()) as any;
+    const raw = decodeURIComponent(escape(atob(d.content || "")));
+    const re = /^theme:\s*.*$/m;
+    const next = re.test(raw)
+      ? raw.replace(re, "theme: " + name)
+      : raw.replace(/\s*$/, "") + "\ntheme: " + name + "\n";
+    const saved = await handleSaveFile(env, { path: "_config.yml", content: next, branch });
+    const savedData = (await saved.json().catch(() => ({}))) as any;
+    if (!savedData.ok) return json({ ok: false, error: savedData.error || "保存 _config.yml 失败" }, 502);
+    // 触发部署让新主题生效
+    const build = await handleTriggerBuild(env);
+    const buildData = (await build.json().catch(() => ({}))) as any;
+    return json({
+      ok: true,
+      theme: name,
+      build_triggered: !!buildData.ok,
+      message: "已切换主题为 " + name + "，正在重新部署站点",
     });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);

@@ -404,7 +404,7 @@ function getToken(){
 }
 
 // ---------- tab（独立路由 /admin/xxx，SPA 切换：仅改地址栏，绝不刷新）----------
-const TAB_NAMES=['manage','upload','comments','files','build','visit','subscribe','ai','settings','write'];
+const TAB_NAMES=['manage','upload','comments','files','build','theme','visit','subscribe','ai','settings','write'];
 function showPage(name){ activePage=name; $$('.wk-page').forEach(p=>p.classList.toggle('hidden', p.id!=='page-'+name)); }
 // 进入写作页（新建/编辑共用）：首次初始化编辑器与草稿
 let writeInited=false;
@@ -433,6 +433,7 @@ function go(name){
     if(name==='comments') loadComments();
     if(name==='files'){ loadFiles(); resumeUnzipStatus(); }
     if(name==='build'){ loadBuildWorkflows(); loadBuildHistory(); }
+    if(name==='theme') loadThemes();
     if(name==='visit') loadVisit();
     if(name==='subscribe') loadSubscribe();
     if(name==='ai'){ loadAiChat(); aiFitHeight(); }
@@ -447,6 +448,133 @@ function go(name){
   try{ history.replaceState(null,'',url); }catch(e){}
 }
 function switchTab(name){ go(name); }
+
+// ---------- 主题管理（自动检测 themes/ 目录 + 切换 + 克隆添加）----------
+let themeListData = [];
+async function loadThemes(){
+  const box = $('#themeList');
+  if(box) box.innerHTML = '<div class="empty">加载中...</div>';
+  try{
+    const r = await api('/admin/api/themes');
+    if(!r.ok || !r.data){
+      if(box) box.innerHTML = '<div class="empty">加载失败：' + esc((r.data && r.data.error) || '未知错误') + '</div>';
+      return;
+    }
+    themeListData = r.data.themes || [];
+    if(!box) return;
+    if(!themeListData.length){ box.innerHTML = '<div class="empty">themes/ 目录下没有主题，可在下方添加</div>'; return; }
+    let h = '<table class="wk-table"><thead><tr><th>主题目录</th><th>状态</th><th style="text-align:right">操作</th></tr></thead><tbody>';
+    themeListData.forEach((t, i) => {
+      const cur = !!(t.current && t.valid);
+      h += '<tr><td>' + esc(t.name) + '</td>'
+        + '<td>' + (cur ? '<span class="wk-tag ok">当前主题</span>'
+          : (t.valid ? '<span class="wk-tag">可用</span>' : '<span class="wk-tag off">非主题目录</span>')) + '</td>'
+        + '<td style="text-align:right">' + (cur
+          ? '<button class="wk-btn ghost sm" disabled>使用中</button>'
+          : (t.valid ? '<button class="wk-btn sm" onclick="switchTheme(' + i + ')">切换</button>' : '')) + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    box.innerHTML = h;
+  }catch(e){ if(box) box.innerHTML = '<div class="empty">加载失败</div>'; }
+}
+async function switchTheme(i){
+  const t = themeListData[i];
+  if(!t) return;
+  if(!confirm('确认切换主题为「' + t.name + '」？将修改 _config.yml 并触发部署重建站点。')) return;
+  const msg = $('#themeMsg');
+  if(msg){ msg.className='msg'; msg.textContent='切换中...'; }
+  const r = await api('/admin/api/themes/switch', { method:'POST', body: JSON.stringify({ name: t.name }) });
+  if(r.ok){
+    toast((r.data && r.data.message) || '已切换主题');
+    if(msg){ msg.className='msg ok'; msg.textContent=(r.data && r.data.message) || '已切换主题，等待部署完成即可生效'; }
+    loadThemes();
+    initBuildStatus();
+  } else {
+    const err = (r.data && r.data.error) || '切换失败';
+    toast(err, true);
+    if(msg){ msg.className='msg err'; msg.textContent=err; }
+  }
+}
+// 解析 GitHub 地址：支持 owner/repo、https://github.com/owner/repo、…/tree/branch、.git 结尾、git@ 形式
+function parseGithubUrl(input){
+  let s = String(input || '').trim();
+  if(!s) return null;
+  s = s.replace(/^git@github\\.com:/i, 'https://github.com/');
+  const m = /^(?:https?:\\/\\/)?(?:www\\.)?github\\.com\\/([^\\/\\s]+)\\/([^\\/\\s#?]+?)(?:\\.git)?(?:\\/tree\\/([^\\/\\s#?]+))?$/i.exec(s);
+  if(m) return { owner: m[1], repo: m[2], branch: m[3] || '' };
+  const m2 = /^([\\w.-]+)\\/([\\w.-]+?)(?:\\.git)?$/.exec(s);
+  if(m2) return { owner: m2[1], repo: m2[2], branch: '' };
+  return null;
+}
+async function addTheme(){
+  const url = (($('#themeRepoUrl')||{}).value || '').trim();
+  let dir = (($('#themeDirName')||{}).value || '').trim();
+  const msg = $('#themeMsg');
+  const show = (ok, text) => { if(msg){ msg.className = ok ? 'msg ok' : 'msg err'; msg.textContent = text; } };
+  const p = parseGithubUrl(url);
+  if(!p){ show(false, '无法识别的 GitHub 地址，请输入如 https://github.com/owner/repo 的链接'); toast('地址无法识别', true); return; }
+  if(!dir) dir = p.repo;
+  dir = dir.replace(/[^\\w.\\-\\u4e00-\\u9fa5]+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  if(!dir){ show(false, '目录名无效'); toast('目录名无效', true); return; }
+  // 目标目录重名时自动加后缀，避免克隆工作流因目录非空而中止
+  const exists = new Set(themeListData.map(t => t.name));
+  let target = dir, n = 2;
+  while(exists.has(target)) target = dir + '-' + (n++);
+  const btn = $('#themeAddBtn');
+  if(btn) btn.disabled = true;
+  show(true, '正在触发克隆到 themes/' + target + '...');
+  try{
+    const r = await api('/admin/api/clone-repo', { method:'POST', body: JSON.stringify({
+      repo_url: 'https://github.com/' + p.owner + '/' + p.repo + '.git',
+      target_dir: 'themes/' + target,
+      ref: p.branch || ''
+    }) });
+    if(!r.ok){
+      const err = (r.data && r.data.error) || '触发克隆失败';
+      show(false, err);
+      toast(err, true);
+      return;
+    }
+    toast('已触发克隆，等待完成...');
+    pollThemeClone(target);
+  } finally { if(btn) btn.disabled = false; }
+}
+// 轮询 clone-repo 工作流状态，成功后刷新主题列表
+let themeCloneTimer = null;
+function pollThemeClone(target){
+  const bar = $('#themeCloneStatus');
+  if(bar){ bar.classList.remove('hidden'); bar.className = 'build-banner'; bar.textContent = '克隆 themes/' + target + ' 进行中...'; }
+  if(themeCloneTimer) clearInterval(themeCloneTimer);
+  let times = 0;
+  themeCloneTimer = setInterval(async () => {
+    times++;
+    try{
+      const r = await api('/admin/api/workflows/runs?workflow=clone-repo.yml&limit=1');
+      const run = r.ok && r.data && r.data.runs && r.data.runs[0];
+      if(!run) return;
+      if(bar){
+        if(run.status === 'completed'){
+          bar.className = 'build-banner' + (run.conclusion === 'failure' ? ' err' : '');
+          bar.textContent = '克隆 themes/' + target + (run.conclusion === 'success' ? ' 完成' : ' 失败（' + (run.conclusion || '未知原因') + '）');
+        } else {
+          bar.textContent = '克隆 themes/' + target + ' 进行中（' + run.status + '）...';
+        }
+      }
+      if(run.status === 'completed'){
+        clearInterval(themeCloneTimer); themeCloneTimer = null;
+        if(run.conclusion === 'success'){
+          toast('主题克隆完成');
+          loadThemes();
+          setTimeout(() => { const b = $('#themeCloneStatus'); if(b) b.classList.add('hidden'); }, 8000);
+        } else {
+          toast('克隆失败：' + (run.conclusion || '未知原因'), true);
+        }
+      } else if(times > 60){
+        clearInterval(themeCloneTimer); themeCloneTimer = null;
+      }
+    }catch(e){}
+  }, 5000);
+}
 
 // ---------- 访问量（仅管理员可见）----------
 let visitDays = 30;
@@ -2196,7 +2324,7 @@ async function delSecret(name){
 
 // ---------- 订阅管理（SMTP 配置 + 订阅者 + 群发）----------
 function subSet(id, v){ const el=$('#'+id); if(el) el.value = (v==null?'':v); }
-// 仅加载 SMTP/订阅邮件模板（SMTP 字段在「设置」页，模板在「订阅管理」页）
+// 仅加载 SMTP/订阅邮件模板（SMTP 字段在「订阅管理」页，模板在「设置」页）
 async function loadSubscribeSettings(){
   try{
     const r = await api('/admin/api/subscribe/settings');
@@ -2233,7 +2361,7 @@ async function saveSubscribeSettings(){
     dailyLimit: v('smDailyLimit')
   };
   const r = await api('/admin/api/subscribe/settings', { method:'PUT', body: JSON.stringify(payload) });
-  const msg = $('#subMsg');
+  const msg = $('#smtpMsg') || $('#subMsg');
   if(r.ok){
     toast('配置已保存');
     if(msg){ msg.className='msg ok'; msg.textContent='配置已保存'; }
@@ -3724,6 +3852,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
   <button class="wk-tab ${INITIAL === "comments" ? "active" : ""}" data-tab="comments">评论管理</button>
   <button class="wk-tab ${INITIAL === "files" ? "active" : ""}" data-tab="files">文件管理</button>
   <button class="wk-tab ${INITIAL === "build" ? "active" : ""}" data-tab="build">部署记录</button>
+  <button class="wk-tab ${INITIAL === "theme" ? "active" : ""}" data-tab="theme">主题</button>
   <button class="wk-tab ${INITIAL === "visit" ? "active" : ""}" data-tab="visit">访问量</button>
   <button class="wk-tab ${INITIAL === "subscribe" ? "active" : ""}" data-tab="subscribe">订阅管理</button>
   <button class="wk-tab ${INITIAL === "ai" ? "active" : ""}" data-tab="ai">AI 助手</button>
@@ -3890,6 +4019,30 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
+  <!-- 主题管理（自动检测 themes/ 目录 + 切换主题 + 克隆添加） -->
+  <div id="page-theme" class="${pageCls("theme")}">
+    <div class="wk-card">
+      <div class="toolbar" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+        <h3 class="wk-title" style="margin:0;border:none;padding:0">已安装主题</h3>
+        <button class="wk-btn ghost sm" onclick="loadThemes()">刷新</button>
+      </div>
+      <p class="wk-label" style="margin-top:0">自动检测仓库 themes/ 目录下的主题；切换会修改 _config.yml 并自动触发部署，站点几分钟后用新主题重建。</p>
+      <div id="themeList"><div class="empty">加载中...</div></div>
+    </div>
+
+    <div class="wk-card">
+      <h3 class="wk-title">添加主题</h3>
+      <p class="wk-label" style="margin-top:0">粘贴 GitHub 主题地址，自动克隆到 themes/ 目录。支持项目主页（github.com/owner/repo）、分支页（…/tree/main）、.git 结尾的地址。</p>
+      <div class="filters" style="flex-wrap:wrap">
+        <input class="wk-input" id="themeRepoUrl" style="flex:1;min-width:220px" placeholder="https://github.com/owner/repo">
+        <input class="wk-input" id="themeDirName" style="width:180px" placeholder="目录名（默认仓库名）">
+        <button class="wk-btn sm" id="themeAddBtn" onclick="addTheme()">克隆主题</button>
+      </div>
+      <div class="msg" id="themeMsg"></div>
+      <div class="build-banner hidden" id="themeCloneStatus"></div>
+    </div>
+  </div>
+
   <!-- 访问量（仅管理员可见） -->
   <div id="page-visit" class="${pageCls("visit")}">
     <div class="stats-scroll"><div class="stats">
@@ -3912,8 +4065,51 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 订阅管理（订阅者 + 群发；订阅设置(邮件模板)、SMTP 均在「设置」页） -->
+  <!-- 订阅管理（SMTP + 订阅者 + 群发；订阅设置(邮件模板)仍在「设置」页） -->
   <div id="page-subscribe" class="${pageCls("subscribe")}">
+    <details class="wk-collapse">
+      <summary>SMTP 邮件服务器</summary>
+      <div class="wk-collapse-body">
+        <p class="wk-label" style="margin-top:0">用于发送订阅确认与群发邮件。<b>Workers 仅支持 465 端口（隐式 TLS）</b>；QQ/163 等邮箱请填写「授权码」而非登录密码。</p>
+        <div class="wk-row">
+          <div style="flex:2">
+            <label class="wk-label">SMTP 服务器</label>
+            <input class="wk-input" id="smHost" placeholder="smtp.qq.com">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">端口</label>
+            <input class="wk-input" id="smPort" type="number" value="465" placeholder="465">
+          </div>
+        </div>
+        <div class="wk-row">
+          <div style="flex:1">
+            <label class="wk-label">用户名</label>
+            <input class="wk-input" id="smUser" placeholder="you@qq.com">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">密码 / 授权码</label>
+            <input class="wk-input" id="smPass" type="password" placeholder="留空表示不修改">
+          </div>
+        </div>
+        <div class="wk-row">
+          <div style="flex:1">
+            <label class="wk-label">发件人名称</label>
+            <input class="wk-input" id="smFromName" placeholder="我的博客">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">发件人邮箱（默认同用户名）</label>
+            <input class="wk-input" id="smFromEmail" placeholder="you@qq.com">
+          </div>
+        </div>
+        <div class="filters" style="margin:14px 0 0">
+          <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存 SMTP 配置</button>
+          <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
+          <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
+        </div>
+        <div class="msg" id="smtpMsg"></div>
+      </div>
+    </details>
+
     <div class="wk-card">
       <h3 class="wk-title">订阅者</h3>
       <div class="stats-scroll"><div class="stats">
@@ -4022,7 +4218,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 设置（各分区可展开/收起：后台设置[外观主题+工作流+站点功能]、SMTP、订阅设置、API 说明） -->
+  <!-- 设置（各分区可展开/收起：后台设置[外观主题+工作流+站点功能]、订阅设置、API 说明；SMTP 在「订阅管理」页） -->
   <div id="page-settings" class="${pageCls("settings")}">
     <details class="wk-collapse">
       <summary>后台设置</summary>
@@ -4035,6 +4231,8 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
             <option value="light">浅色模式</option>
             <option value="dark">深色模式</option>
           </select>
+        </div>
+        <div class="filters" style="margin:10px 0 0">
           <span class="wk-label" style="margin:0">主题色</span>
           <select class="wk-input" id="setAccent" onchange="applyAccent(this.value)" style="width:auto;min-width:150px;padding:4px 8px">
             <option value="#f97316">橙色（默认）</option>
@@ -4070,48 +4268,6 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         </div>
         <div class="msg" id="adminMsg"></div>
         <div class="msg" id="siteMsg"></div>
-      </div>
-    </details>
-
-    <details class="wk-collapse">
-      <summary>SMTP 邮件服务器</summary>
-      <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">用于发送订阅确认与群发邮件。<b>Workers 仅支持 465 端口（隐式 TLS）</b>；QQ/163 等邮箱请填写「授权码」而非登录密码。</p>
-        <div class="wk-row">
-          <div style="flex:2">
-            <label class="wk-label">SMTP 服务器</label>
-            <input class="wk-input" id="smHost" placeholder="smtp.qq.com">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">端口</label>
-            <input class="wk-input" id="smPort" type="number" value="465" placeholder="465">
-          </div>
-        </div>
-        <div class="wk-row">
-          <div style="flex:1">
-            <label class="wk-label">用户名</label>
-            <input class="wk-input" id="smUser" placeholder="you@qq.com">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">密码 / 授权码</label>
-            <input class="wk-input" id="smPass" type="password" placeholder="留空表示不修改">
-          </div>
-        </div>
-        <div class="wk-row">
-          <div style="flex:1">
-            <label class="wk-label">发件人名称</label>
-            <input class="wk-input" id="smFromName" placeholder="我的博客">
-          </div>
-          <div style="flex:1">
-            <label class="wk-label">发件人邮箱（默认同用户名）</label>
-            <input class="wk-input" id="smFromEmail" placeholder="you@qq.com">
-          </div>
-        </div>
-        <div class="filters" style="margin:14px 0 0">
-          <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存 SMTP 配置</button>
-          <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
-          <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
-        </div>
       </div>
     </details>
 
