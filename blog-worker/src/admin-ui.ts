@@ -412,11 +412,17 @@ const TAB_NAMES=['manage','upload','comments','files','build','theme','visit','s
 function showPage(name){ activePage=name; $$('.wk-page').forEach(p=>p.classList.toggle('hidden', p.id!=='page-'+name)); }
 // 进入写作页（新建/编辑共用）：首次初始化编辑器与草稿
 let writeInited=false;
+// 本地时区的「今天」（toISOString 是 UTC，东八区早上会变前一天，这里按浏览器本地日期）
+function localToday(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
 function enterWritePage(){
   if(!writeInited){
     writeInited=true;
     if(!editingPath){
-      if(!loadDraft()) $('#date').value=new Date().toISOString().slice(0,10);
+      // 新文章日期始终为当前日期（即使恢复草稿也一样），用户仍可手动改
+      $('#date').value=localToday();
       restoreDraft();
     }
     initEditorOnce();
@@ -2649,7 +2655,7 @@ async function openEdit(path){
   if(!r.ok){ toast('加载失败 '+r.status,true); return; }
   const p=r.data.post||{};
   $('#title').value=p.title||'';
-  $('#date').value=(p.date||new Date().toISOString().slice(0,10)).slice(0,10);
+  $('#date').value=(p.date||localToday()).slice(0,10);
   $('#tags').value=(p.tags||[]).join(', ');
   $('#categories').value=(p.categories||[]).join('，');
   $('#editorTitle').textContent='编辑：'+(p.title||nameOf(p.path));
@@ -2669,7 +2675,7 @@ async function savePost(){
   if(!title){ toast('请填写标题',true); return; }
   if(!content.trim()){ toast('请填写正文',true); return; }
   const body={ title, content,
-    date:$('#date').value||new Date().toISOString().slice(0,10),
+    date:$('#date').value||localToday(),
     tags:$('#tags').value.split(/[,，\\s]+/).map(s=>s.trim()).filter(Boolean),
     categories:$('#categories').value.split(/[,，\\s]+/).map(s=>s.trim()).filter(Boolean) };
   if(editingPath) body.path=editingPath;
@@ -3732,7 +3738,7 @@ function restoreDraft(){
   const d=loadDraft();
   if(!d) return;
   $('#title').value=d.title||'';
-  $('#date').value=(d.date||new Date().toISOString().slice(0,10)).slice(0,10);
+  // 日期不恢复草稿值：新文章日期始终为当前日期（调用方已设好）
   $('#tags').value=d.tags||'';
   $('#categories').value=d.categories||'';
   if(d.content){ pendingEditorValue=d.content; $('#editorTitle').textContent='发布新文章（已恢复草稿）'; }
@@ -3791,7 +3797,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
   $('#newBtn').onclick=()=>{
     editingPath='';
     ['title','date','tags','categories'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-    $('#date').value=new Date().toISOString().slice(0,10);
+    $('#date').value=localToday();
     $('#editorTitle').textContent='发布新文章';
     $('#saveBtn').textContent='发布文章';
     pendingEditorValue='';

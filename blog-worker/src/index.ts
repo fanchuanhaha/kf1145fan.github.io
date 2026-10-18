@@ -2948,7 +2948,13 @@ function parseFrontMatter(raw: string): {
       if (kv) {
         const k = kv[1].toLowerCase();
         const v = kv[2];
-        if (k === "title") title = v.trim();
+        if (k === "title") {
+          // 去掉发布时包裹的引号（title: 'xxx' / "xxx"），并把 \' 转义还原
+          const t = v.trim();
+          title = t
+            .replace(/^['"](.*)['"]$/, "$1")
+            .replace(/\\(['"])/g, "$1");
+        }
         else if (k === "date") {
           const d = v.match(/(\d{4}-\d{2}-\d{2})/);
           if (d) date = d[1];
