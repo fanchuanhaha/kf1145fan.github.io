@@ -1,5 +1,5 @@
 import { createMiddleware } from "hono/factory";
-import type { Env, Variables } from "../env.js";
+import type { Env, UserInfo, Variables } from "../env.js";
 
 /**
  * Non-blocking auth middleware.
@@ -30,6 +30,18 @@ export const auth = createMiddleware<{
 
 		const payload = await verifyJwt(token, jwtSecret);
 		if (!payload?.id) return next();
+
+		// 博客后台独立管理员 token（scope=blog-admin，bl_Admin 表签发）：
+		// 与评论区账号体系解耦，但仍允许其管理评论（后台评论管理页直接调用 /waline/api/comment）
+		if ((payload as { scope?: string }).scope === "blog-admin") {
+			c.set("userInfo", {
+				objectId: payload.id,
+				display_name: "管理员",
+				email: "",
+				type: "administrator",
+			} as unknown as UserInfo);
+			return next();
+		}
 
 		// Fetch user from DB
 		const user = await c.env.DB.prepare(

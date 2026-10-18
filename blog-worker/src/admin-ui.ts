@@ -3,7 +3,7 @@
  * - 无大圆角、简约、适配深色模式、字号偏小
  * - 顶部标签：管理文章（默认首页）/ 评论管理；写作页从「＋ 添加新文章」按钮进入，
  *   批量上传页不占顶部标签栏，从写作页「批量上传」按钮（或管理页按钮）进入
- * - 登录态：由服务端 Cookie(wl_token) 判定是否返回本页；本页加载时读取 token，
+ * - 登录态：由服务端 Cookie(bl_token) 判定是否返回本页（独立管理员体系，与评论区账号无关）；
  *   无效则跳转 /admin/login，刷新不再闪登录界面
  * - 编辑器：Vditor「分屏复杂模式」（SV，参考 cp.802213.xyz）
  * - 评论管理：全部 / 待审批 / 已通过 / 垃圾 + 通过/垃圾/删除
@@ -402,11 +402,11 @@ function toast(msg, isErr){
   toast._t = setTimeout(()=>{ el.style.opacity='0'; }, 2400);
 }
 
-// 读取登录态：Cookie 或 localStorage；非法则跳登录页（由 /admin 服务端已保证 Cookie 存在）
+// 读取登录态：Cookie(bl_token) 由服务端签发与校验；非法则跳登录页（由 /admin 服务端已保证 Cookie 存在）
 function getToken(){
-  const c = document.cookie.split(';').map(s=>s.trim()).find(s=>s.startsWith('wl_token='));
-  if (c) { try { return decodeURIComponent(c.slice('wl_token='.length)); } catch(e){} }
-  return storage.get('TOKEN');
+  const c = document.cookie.split(';').map(s=>s.trim()).find(s=>s.startsWith('bl_token='));
+  if (c) { try { return decodeURIComponent(c.slice('bl_token='.length)); } catch(e){} }
+  return '';
 }
 
 // ---------- tab（独立路由 /admin/xxx，SPA 切换：仅改地址栏，绝不刷新）----------
@@ -754,6 +754,25 @@ async function saveWorkflowMode(){
     const err = (r.data && r.data.error) || '保存失败';
     toast(err, true);
     if(msg){ msg.className='msg err'; msg.textContent=err; }
+  }
+}
+
+// 管理员账号：修改密码（独立管理员体系）
+async function changeAdminPassword(){
+  const m = $('#pwMsg');
+  const o = $('#pwOld').value, n = $('#pwNew').value, n2 = $('#pwNew2').value;
+  if(!o || !n){ if(m){ m.className='msg err'; m.textContent='请输入旧密码和新密码'; } return; }
+  if(n !== n2){ if(m){ m.className='msg err'; m.textContent='两次输入的新密码不一致'; } return; }
+  const r = await api('/api/admin/password', { method:'POST', body: JSON.stringify({ old_password:o, new_password:n }) });
+  if(r.status === 401){ redirectLogin(); return; }
+  if(m){
+    if(r.ok && r.data && r.data.ok){
+      m.className='msg ok'; m.textContent='密码已修改，下次登录使用新密码';
+      $('#pwOld').value=''; $('#pwNew').value=''; $('#pwNew2').value='';
+      toast('管理员密码已修改');
+    } else {
+      m.className='msg err'; m.textContent=(r.data && r.data.error) || '修改失败';
+    }
   }
 }
 
@@ -3773,24 +3792,23 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const m = location.pathname.match(/\\/admin\\/ai\\/([^\\/]+)\\/?$/);
     if(m) aiPendingConv = decodeURIComponent(m[1]);
   }catch(e){}
-  // 校验 token，无效跳登录页
-  fetch('/waline/api/token',{headers:{Authorization:'Bearer '+token}})
-    .then(r=>r.json()).then(d=>{
-      if(d.errno!==0||!d.data||d.data.type!=='administrator'){ redirectLogin(); return; }
-      $('#userName').textContent=d.data.display_name||'管理员';
-      if(window.__INITIAL__==='write'){
-        enterWritePage();
-      } else {
-        switchTab(window.__INITIAL__||'manage');
-      }
-      // 全局：任意标签页都能看到「正在运行的部署工作流」与失败入口
-      // 先确认 AI 是否已配置，再渲染横幅（决定失败横幅里是否给「发给 AI」按钮）
-      checkAiConfigured().finally(()=>initBuildStatus());
-    }).catch(()=>redirectLogin());
+  // 校验登录态（独立管理员体系），无效跳登录页
+  fetch('/api/admin/me').then(r=>r.json()).then(d=>{
+    if(!d||!d.ok){ redirectLogin(); return; }
+    $('#userName').textContent=d.email||'管理员';
+    if(window.__INITIAL__==='write'){
+      enterWritePage();
+    } else {
+      switchTab(window.__INITIAL__||'manage');
+    }
+    // 全局：任意标签页都能看到「正在运行的部署工作流」与失败入口
+    // 先确认 AI 是否已配置，再渲染横幅（决定失败横幅里是否给「发给 AI」按钮）
+    checkAiConfigured().finally(()=>initBuildStatus());
+  }).catch(()=>redirectLogin());
 
-  $('#logoutBtn').onclick=()=>{
-    document.cookie='wl_token=;path=/;max-age=0';
-    try{ localStorage.removeItem('TOKEN'); }catch(e){}
+  $('#logoutBtn').onclick=async ()=>{
+    try{ await fetch('/api/admin/logout',{method:'POST'}); }catch(e){}
+    try{ document.cookie='bl_token=;path=/;max-age=0'; }catch(e){}
     location.replace('/admin/login');
   };
   // AI 助手：Enter 发送，Shift+Enter 换行
@@ -4351,6 +4369,31 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         </div>
         <div class="msg" id="adminMsg"></div>
         <div class="msg" id="siteMsg"></div>
+      </div>
+    </details>
+
+    <details class="wk-collapse">
+      <summary>管理员账号</summary>
+      <div class="wk-collapse-body">
+        <p class="wk-label" style="margin-top:0">博客后台的独立登录账号（与评论区账号无关）。修改密码后当前登录保持有效，下次登录使用新密码。</p>
+        <div class="wk-row">
+          <div style="flex:1">
+            <label class="wk-label">旧密码</label>
+            <input class="wk-input" id="pwOld" type="password" autocomplete="current-password">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">新密码</label>
+            <input class="wk-input" id="pwNew" type="password" autocomplete="new-password" placeholder="至少 6 位">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">确认新密码</label>
+            <input class="wk-input" id="pwNew2" type="password" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="filters" style="margin:14px 0 0">
+          <button class="wk-btn sm" onclick="changeAdminPassword()">修改密码</button>
+        </div>
+        <div class="msg" id="pwMsg"></div>
       </div>
     </details>
 

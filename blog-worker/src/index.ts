@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import type { Env, UserInfo, Variables } from "./waline/env.js";
 import walineApp from "./waline/subapp.js";
-import { auth } from "./waline/middleware/auth.js";
+import { signJwt, verifyJwt } from "./waline/middleware/auth.js";
+import { hashPassword, verifyPassword } from "./waline/utils/password.js";
 import { unzipSync } from "fflate";
 import { renderAdminPage } from "./admin-ui.js";
 import { renderAdminLoginPage } from "./admin-login.js";
@@ -123,6 +124,219 @@ app.get("/api/site/init", async (c) => {
     console.error("site init check failed", e);
     return json({ ok: true, needInit: true });
   }
+});
+
+// ---------- 3.2 博客后台独立管理员体系（与 Waline 评论账号完全解耦）----------
+// 独立表 bl_Admin + 独立 JWT（payload 带 scope='blog-admin'）+ 独立 Cookie(bl_token)。
+// 评论系统账号照旧用于评论，不再用于后台登录。
+async function ensureAdminTable(db: D1Database): Promise<void> {
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS "bl_Admin" (
+        "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+        "email" TEXT NOT NULL DEFAULT '',
+        "password" TEXT NOT NULL DEFAULT '',
+        "createdAt" TEXT DEFAULT (datetime('now')),
+        "updatedAt" TEXT DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "idx_bl_admin_email" ON "bl_Admin" ("email")`
+    )
+    .run();
+}
+
+// 从 Cookie / Authorization 头解析 bl_token 并校验（必须带 blog-admin scope，防止拿 Waline token 冒充）
+function adminCookieToken(c: { req: { header: (k: string) => string | undefined; url: string } }): string | undefined {
+  const cookie = c.req.header("Cookie") || "";
+  const m = /(?:^|;\s*)bl_token=([^;]+)/.exec(cookie);
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  }
+  const h = c.req.header("Authorization");
+  if (h?.startsWith("Bearer ")) return h.slice(7);
+  return undefined;
+}
+
+async function adminPayload(
+  token: string | undefined,
+  secret?: string,
+): Promise<{ id: number } | null> {
+  if (!token || !secret) return null;
+  try {
+    const p = (await verifyJwt(token, secret)) as unknown as {
+      id?: number;
+      scope?: string;
+    } | null;
+    if (!p || !p.id || p.scope !== "blog-admin") return null;
+    return { id: p.id };
+  } catch {
+    return null;
+  }
+}
+
+const ADMIN_COOKIE = (token: string) =>
+  `bl_token=${encodeURIComponent(token)};path=/;max-age=2592000;SameSite=Lax`;
+
+// 后台所有 API 统一鉴权：bl_token 有效则注入 administrator 身份，路由内 isAdmin 检查照常生效
+app.use("/admin/api/*", async (c, next) => {
+  const p = await adminPayload(
+    adminCookieToken(c),
+    (c.env as Bindings).JWT_SECRET,
+  );
+  if (p) {
+    c.set("userInfo", {
+      objectId: p.id,
+      display_name: "管理员",
+      email: "",
+      type: "administrator",
+    } as UserInfo);
+  }
+  await next();
+});
+
+// 站点是否已初始化（bl_Admin 是否有管理员）
+app.get("/api/admin/init", async (c) => {
+  const db = (c.env as Bindings).DB;
+  try {
+    await ensureAdminTable(db);
+    const row = await db
+      .prepare(`SELECT COUNT(*) AS count FROM "bl_Admin"`)
+      .first<{ count: number }>();
+    return json({ ok: true, needInit: (row?.count ?? 0) === 0 });
+  } catch (e) {
+    console.error("admin init check failed", e);
+    return json({ ok: false, error: "数据库不可用" }, 500);
+  }
+});
+
+// 首次创建管理员（仅当没有任何管理员时可用）
+app.post("/api/admin/init", async (c) => {
+  const env = c.env as Bindings;
+  const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+  const email = String((body as { email?: unknown }).email || "")
+    .trim()
+    .toLowerCase();
+  const password = String((body as { password?: unknown }).password || "");
+  if (!email || !password)
+    return json({ ok: false, error: "请输入邮箱和密码" }, 400);
+  if (!env.JWT_SECRET)
+    return json({ ok: false, error: "JWT_SECRET 未配置" }, 500);
+  const db = env.DB;
+  try {
+    await ensureAdminTable(db);
+    const row = await db
+      .prepare(`SELECT COUNT(*) AS count FROM "bl_Admin"`)
+      .first<{ count: number }>();
+    if ((row?.count ?? 0) > 0)
+      return json({ ok: false, error: "管理员已存在，请直接登录" }, 403);
+    const r = await db
+      .prepare(`INSERT INTO "bl_Admin" (email, password) VALUES (?, ?)`)
+      .bind(email, await hashPassword(password))
+      .run();
+    const id = r.meta?.last_row_id;
+    const token = await signJwt(
+      { id: id as number, scope: "blog-admin" } as never,
+      env.JWT_SECRET,
+    );
+    c.header("Set-Cookie", ADMIN_COOKIE(token));
+    return json({ ok: true, email });
+  } catch (e) {
+    console.error("admin init failed", e);
+    return json({ ok: false, error: "创建失败，请重试" }, 500);
+  }
+});
+
+// 登录
+app.post("/api/admin/login", async (c) => {
+  const env = c.env as Bindings;
+  const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+  const email = String((body as { email?: unknown }).email || "")
+    .trim()
+    .toLowerCase();
+  const password = String((body as { password?: unknown }).password || "");
+  if (!email || !password)
+    return json({ ok: false, error: "请输入邮箱和密码" }, 400);
+  const db = env.DB;
+  try {
+    await ensureAdminTable(db);
+    const user = await db
+      .prepare(`SELECT * FROM "bl_Admin" WHERE email = ?`)
+      .bind(email)
+      .first<{ id: number; password: string }>();
+    if (!user || !(await verifyPassword(password, user.password)))
+      return json({ ok: false, error: "邮箱或密码错误" }, 401);
+    if (!env.JWT_SECRET)
+      return json({ ok: false, error: "JWT_SECRET 未配置" }, 500);
+    const token = await signJwt(
+      { id: user.id as number, scope: "blog-admin" } as never,
+      env.JWT_SECRET,
+    );
+    c.header("Set-Cookie", ADMIN_COOKIE(token));
+    return json({ ok: true, email });
+  } catch (e) {
+    console.error("admin login failed", e);
+    return json({ ok: false, error: "登录失败，请重试" }, 500);
+  }
+});
+
+// 当前登录信息
+app.get("/api/admin/me", async (c) => {
+  const p = await adminPayload(
+    adminCookieToken(c),
+    (c.env as Bindings).JWT_SECRET,
+  );
+  if (!p) return json({ ok: false, error: "unauthorized" }, 401);
+  const user = await (c.env as Bindings).DB.prepare(
+    `SELECT email FROM "bl_Admin" WHERE id = ?`,
+  )
+    .bind(p.id)
+    .first<{ email: string }>();
+  return json({ ok: true, email: user?.email || "" });
+});
+
+// 退出登录（清 Cookie）
+app.post("/api/admin/logout", (c) => {
+  c.header("Set-Cookie", "bl_token=;path=/;max-age=0;SameSite=Lax");
+  return json({ ok: true });
+});
+
+// 修改管理员密码（需先登录）
+app.post("/api/admin/password", async (c) => {
+  const env = c.env as Bindings;
+  const p = await adminPayload(adminCookieToken(c), env.JWT_SECRET);
+  if (!p) return json({ ok: false, error: "unauthorized" }, 401);
+  const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+  const oldPassword = String(
+    (body as { old_password?: unknown }).old_password || "",
+  );
+  const newPassword = String(
+    (body as { new_password?: unknown }).new_password || "",
+  );
+  if (!oldPassword || !newPassword)
+    return json({ ok: false, error: "请输入旧密码和新密码" }, 400);
+  if (newPassword.length < 6)
+    return json({ ok: false, error: "新密码至少 6 位" }, 400);
+  const db = env.DB;
+  const user = await db
+    .prepare(`SELECT password FROM "bl_Admin" WHERE id = ?`)
+    .bind(p.id)
+    .first<{ password: string }>();
+  if (!user || !(await verifyPassword(oldPassword, user.password)))
+    return json({ ok: false, error: "旧密码错误" }, 401);
+  await db
+    .prepare(
+      `UPDATE "bl_Admin" SET password = ?, updatedAt = datetime('now') WHERE id = ?`,
+    )
+    .bind(await hashPassword(newPassword), p.id)
+    .run();
+  return json({ ok: true });
 });
 
 // ---------- 3.5 访问量统计 API ----------
@@ -296,8 +510,7 @@ app.post("/api/visit", async (c) => {
   }
 });
 
-// ---------- 4. 文章管理 API（需 Waline 管理员 JWT）----------
-app.use("/admin/api/*", auth);
+// ---------- 4. 文章管理 API（需博客管理员 bl_token，见上方 /admin/api/* 中间件）----------
 
 app.get("/admin/api/posts", async (c) => {
   if (!isAdmin(c.get("userInfo"))) return json({ error: "unauthorized" }, 401);
@@ -2323,9 +2536,10 @@ app.get("/admin/api/unzip-status", async (c) => {
 // 独立登录页：未登录跳转到 /admin/login
 app.get("/admin/login", (c) => c.html(renderAdminLoginPage(c.env.SITE_URL || "")));
 app.get("/admin/login/", (c) => c.html(renderAdminLoginPage(c.env.SITE_URL || "")));
-// 已登录访问任意后台页直接渲染，不做跳转
-// 后台页面内联了脚本/样式：禁止缓存，避免更新部署后仍拿到旧界面（如 Markdown 不渲染）
-const adminPage = (c: any, initial: string) => {
+// 服务端鉴权：bl_token 无效直接 302 到登录页（后台页不会闪现）
+const adminPage = async (c: any, initial: string) => {
+  const p = await adminPayload(adminCookieToken(c), c.env.JWT_SECRET);
+  if (!p) return c.redirect("/admin/login");
   c.header("Cache-Control", "no-store, must-revalidate");
   return c.html(renderAdminPage(c.env.SITE_URL || "", c.env.GH_REPO || "", initial));
 };
