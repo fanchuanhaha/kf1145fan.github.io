@@ -127,14 +127,46 @@ app.get("/api/site/init", async (c) => {
 });
 
 // ---------- 3.2 博客后台独立管理员体系（与 Waline 评论账号完全解耦）----------
-// 独立表 bl_Admin + 独立 JWT（payload 带 scope='blog-admin'）+ 独立 Cookie(bl_token)。
+// 独立表 bl_Admin（username 登录）+ 独立 JWT（payload 带 scope='blog-admin'）+ 独立 Cookie(bl_token)。
 // 评论系统账号照旧用于评论，不再用于后台登录。
+// 忘记密码时可在 GitHub Actions 手动运行「重置后台账号」工作流，重置为 admin/admin。
 async function ensureAdminTable(db: D1Database): Promise<void> {
+  // 自愈：检测旧表结构（email 列）——空表直接重建为 username 结构；有数据则补列迁移
+  const cols = await db
+    .prepare(`PRAGMA table_info("bl_Admin")`)
+    .all<{ name: string }>();
+  const hasUsername = (cols.results || []).some((r) => r.name === "username");
+  if (cols.results && cols.results.length > 0) {
+    if (hasUsername) {
+      await db
+        .prepare(
+          `CREATE UNIQUE INDEX IF NOT EXISTS "idx_bl_admin_username" ON "bl_Admin" ("username")`,
+        )
+        .run();
+      return;
+    }
+    const row = await db
+      .prepare(`SELECT COUNT(*) AS count FROM "bl_Admin"`)
+      .first<{ count: number }>();
+    if ((row?.count ?? 0) > 0) {
+      await db
+        .prepare(`ALTER TABLE "bl_Admin" ADD COLUMN "username" TEXT NOT NULL DEFAULT ''`)
+        .run();
+      await db.prepare(`UPDATE "bl_Admin" SET username = email`).run();
+      await db
+        .prepare(
+          `CREATE UNIQUE INDEX IF NOT EXISTS "idx_bl_admin_username" ON "bl_Admin" ("username")`,
+        )
+        .run();
+      return;
+    }
+    await db.prepare(`DROP TABLE "bl_Admin"`).run();
+  }
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS "bl_Admin" (
         "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-        "email" TEXT NOT NULL DEFAULT '',
+        "username" TEXT NOT NULL DEFAULT '',
         "password" TEXT NOT NULL DEFAULT '',
         "createdAt" TEXT DEFAULT (datetime('now')),
         "updatedAt" TEXT DEFAULT (datetime('now'))
@@ -143,7 +175,7 @@ async function ensureAdminTable(db: D1Database): Promise<void> {
     .run();
   await db
     .prepare(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "idx_bl_admin_email" ON "bl_Admin" ("email")`
+      `CREATE UNIQUE INDEX IF NOT EXISTS "idx_bl_admin_username" ON "bl_Admin" ("username")`,
     )
     .run();
 }
@@ -220,12 +252,10 @@ app.get("/api/admin/init", async (c) => {
 app.post("/api/admin/init", async (c) => {
   const env = c.env as Bindings;
   const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
-  const email = String((body as { email?: unknown }).email || "")
-    .trim()
-    .toLowerCase();
+  const username = String((body as { username?: unknown }).username || "").trim();
   const password = String((body as { password?: unknown }).password || "");
-  if (!email || !password)
-    return json({ ok: false, error: "请输入邮箱和密码" }, 400);
+  if (!username || !password)
+    return json({ ok: false, error: "请输入用户名和密码" }, 400);
   if (!env.JWT_SECRET)
     return json({ ok: false, error: "JWT_SECRET 未配置" }, 500);
   const db = env.DB;
@@ -237,8 +267,8 @@ app.post("/api/admin/init", async (c) => {
     if ((row?.count ?? 0) > 0)
       return json({ ok: false, error: "管理员已存在，请直接登录" }, 403);
     const r = await db
-      .prepare(`INSERT INTO "bl_Admin" (email, password) VALUES (?, ?)`)
-      .bind(email, await hashPassword(password))
+      .prepare(`INSERT INTO "bl_Admin" (username, password) VALUES (?, ?)`)
+      .bind(username, await hashPassword(password))
       .run();
     const id = r.meta?.last_row_id;
     const token = await signJwt(
@@ -246,10 +276,10 @@ app.post("/api/admin/init", async (c) => {
       env.JWT_SECRET,
     );
     c.header("Set-Cookie", ADMIN_COOKIE(token));
-    return json({ ok: true, email });
+    return json({ ok: true, username });
   } catch (e) {
     console.error("admin init failed", e);
-    return json({ ok: false, error: "创建失败，请重试" }, 500);
+    return json({ ok: false, error: "创建失败（用户名可能已被占用），请重试" }, 500);
   }
 });
 
@@ -257,21 +287,19 @@ app.post("/api/admin/init", async (c) => {
 app.post("/api/admin/login", async (c) => {
   const env = c.env as Bindings;
   const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
-  const email = String((body as { email?: unknown }).email || "")
-    .trim()
-    .toLowerCase();
+  const username = String((body as { username?: unknown }).username || "").trim();
   const password = String((body as { password?: unknown }).password || "");
-  if (!email || !password)
-    return json({ ok: false, error: "请输入邮箱和密码" }, 400);
+  if (!username || !password)
+    return json({ ok: false, error: "请输入用户名和密码" }, 400);
   const db = env.DB;
   try {
     await ensureAdminTable(db);
     const user = await db
-      .prepare(`SELECT * FROM "bl_Admin" WHERE email = ?`)
-      .bind(email)
+      .prepare(`SELECT * FROM "bl_Admin" WHERE username = ?`)
+      .bind(username)
       .first<{ id: number; password: string }>();
     if (!user || !(await verifyPassword(password, user.password)))
-      return json({ ok: false, error: "邮箱或密码错误" }, 401);
+      return json({ ok: false, error: "用户名或密码错误" }, 401);
     if (!env.JWT_SECRET)
       return json({ ok: false, error: "JWT_SECRET 未配置" }, 500);
     const token = await signJwt(
@@ -279,7 +307,7 @@ app.post("/api/admin/login", async (c) => {
       env.JWT_SECRET,
     );
     c.header("Set-Cookie", ADMIN_COOKIE(token));
-    return json({ ok: true, email });
+    return json({ ok: true, username });
   } catch (e) {
     console.error("admin login failed", e);
     return json({ ok: false, error: "登录失败，请重试" }, 500);
@@ -294,11 +322,11 @@ app.get("/api/admin/me", async (c) => {
   );
   if (!p) return json({ ok: false, error: "unauthorized" }, 401);
   const user = await (c.env as Bindings).DB.prepare(
-    `SELECT email FROM "bl_Admin" WHERE id = ?`,
+    `SELECT username FROM "bl_Admin" WHERE id = ?`,
   )
     .bind(p.id)
-    .first<{ email: string }>();
-  return json({ ok: true, email: user?.email || "" });
+    .first<{ username: string }>();
+  return json({ ok: true, username: user?.username || "" });
 });
 
 // 退出登录（清 Cookie）

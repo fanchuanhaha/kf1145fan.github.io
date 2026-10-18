@@ -21,7 +21,7 @@ html,body{height:100%}
 body{margin:0;font:13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif;
 background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;padding:16px}
 .card{width:100%;max-width:340px;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:28px}
-.brand{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.brand{margin-bottom:4px}
 h1{font-size:16px;margin:0;font-weight:600}
 .sub{color:var(--muted);font-size:12px;margin:4px 0 20px}
 label{font-size:12px;color:var(--muted);display:block;margin:12px 0 4px}
@@ -61,24 +61,24 @@ async function goIn(){
   location.replace('/admin');
 }
 async function doLogin(){
-  const email=$('#email').value.trim(), pass=$('#pass').value;
-  if(!email||!pass){ setMsg('请输入邮箱和密码'); return; }
+  const user=$('#user').value.trim(), pass=$('#pass').value;
+  if(!user||!pass){ setMsg('请输入用户名和密码'); return; }
   const btn=$('#btn'); btn.disabled=true; btn.textContent='登录中...'; setMsg('');
   try{
-    const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pass})});
+    const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:pass})});
     const d=await r.json().catch(()=>({}));
     if(!r.ok||!d.ok){ btn.disabled=false; btn.textContent='登录'; setMsg(d.error||'登录失败'); return; }
     await goIn();
   }catch(e){ btn.disabled=false; btn.textContent='登录'; setMsg('网络错误，请重试'); }
 }
 async function doRegister(){
-  const email=$('#remail').value.trim();
+  const user=$('#ruser').value.trim();
   const p1=$('#rpass').value, p2=$('#rpass2').value;
-  if(!email||!p1){ setMsg('请输入邮箱和密码'); return; }
+  if(!user||!p1){ setMsg('请输入用户名和密码'); return; }
   if(p1!==p2){ setMsg('两次输入的密码不一致'); return; }
   const btn=$('#rbtn'); btn.disabled=true; btn.textContent='创建中...'; setMsg('');
   try{
-    const r=await fetch('/api/admin/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:p1})});
+    const r=await fetch('/api/admin/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:p1})});
     const d=await r.json().catch(()=>({}));
     if(!r.ok||!d.ok){ btn.disabled=false; btn.textContent='创建管理员账号'; setMsg(d.error||'创建失败'); return; }
     setMsg('创建成功，跳转中...');
@@ -89,11 +89,11 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('#btn').onclick=doLogin;
   $('#rbtn').onclick=doRegister;
   $('#toReg').onclick=()=>showPane(true);
-  ['email','pass'].forEach(id=>{
+  ['user','pass'].forEach(id=>{
     const el=$('#'+id);
     if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); });
   });
-  ['remail','rpass','rpass2'].forEach(id=>{
+  ['ruser','rpass','rpass2'].forEach(id=>{
     const el=$('#'+id);
     if(el) el.addEventListener('keydown',e=>{ if(e.key==='Enter') doRegister(); });
   });
@@ -137,8 +137,8 @@ export function renderAdminLoginPage(siteUrl: string): string {
   <div class="sub" id="sub">使用管理员账号登录</div>
 
   <div id="loginWrap">
-    <label for="email">邮箱</label>
-    <input id="email" autocomplete="email" placeholder="admin@example.com">
+    <label for="user">用户名</label>
+    <input id="user" autocomplete="username" placeholder="admin">
     <label for="pass">密码</label>
     <input id="pass" type="password" autocomplete="current-password" placeholder="••••••••">
     <button id="btn">登录</button>
@@ -146,8 +146,8 @@ export function renderAdminLoginPage(siteUrl: string): string {
   </div>
 
   <div id="regWrap" class="hid">
-    <label for="remail">邮箱</label>
-    <input id="remail" autocomplete="email" placeholder="admin@example.com">
+    <label for="ruser">用户名</label>
+    <input id="ruser" autocomplete="username" placeholder="admin">
     <label for="rpass">密码</label>
     <input id="rpass" type="password" autocomplete="new-password" placeholder="至少 6 位">
     <label for="rpass2">确认密码</label>

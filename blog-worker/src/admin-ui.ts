@@ -3795,7 +3795,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
   // 校验登录态（独立管理员体系），无效跳登录页
   fetch('/api/admin/me').then(r=>r.json()).then(d=>{
     if(!d||!d.ok){ redirectLogin(); return; }
-    $('#userName').textContent=d.email||'管理员';
+    $('#userName').textContent=d.username||'管理员';
     if(window.__INITIAL__==='write'){
       enterWritePage();
     } else {
@@ -4375,7 +4375,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     <details class="wk-collapse">
       <summary>管理员账号</summary>
       <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">博客后台的独立登录账号（与评论区账号无关）。修改密码后当前登录保持有效，下次登录使用新密码。</p>
+        <p class="wk-label" style="margin-top:0">博客后台的独立登录账号（用户名 + 密码，与评论区账号无关）。修改密码后当前登录保持有效，下次登录使用新密码。<br>忘记密码？到 GitHub 仓库的 Actions 页手动运行「重置后台账号」工作流，账号密码会重置为 <b>admin / admin</b>（重置后登录页会重新出现「创建管理员」入口，建议登录后立即改密码）。</p>
         <div class="wk-row">
           <div style="flex:1">
             <label class="wk-label">旧密码</label>
