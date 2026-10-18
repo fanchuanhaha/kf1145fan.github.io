@@ -2728,12 +2728,14 @@ async function handleListPosts(env: Bindings): Promise<Response> {
   if (!token) return json({ ok: false, error: "GH_TOKEN not configured" }, 500);
   try {
     const res = await fetch(
-      `https://api.github.com/repos/${repo}/contents/${postsDir}`,
+      `https://api.github.com/repos/${repo}/contents/${encodeURIComponent(postsDir)}`,
       { headers },
     );
+    // 404 = 目录为空或尚未创建，视为没有文章而不是失败
+    if (res.status === 404) return json({ ok: true, posts: [], allCategories: [], allTags: [] });
     if (!res.ok) return json({ ok: false, error: "github error " + res.status }, 502);
-    const data = (await res.json()) as any[];
-    const files = (data || []).filter((f) => f.name?.endsWith(".md"));
+    const data = (await res.json()) as any;
+    const files = (Array.isArray(data) ? data : []).filter((f) => f.name?.endsWith(".md"));
 
     // 分批读取每篇 front matter（全并发会触发 GitHub 二级限流导致部分文章丢日期、排序错乱）
     const fetchMeta = async (f: any) => {
@@ -3125,19 +3127,51 @@ function normalizePaths(input: unknown): string[] {
     : [];
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// 删除文章时同步清理对应评论（按文件 slug 匹配页面 URL，如 /2026/07/18/slug/）
+async function deleteCommentsForPost(env: Bindings, path: string): Promise<number> {
+  const name = path.split("/").pop() || "";
+  if (!/\.(md|markdown|txt)$/i.test(name)) return 0;
+  let slug = name.replace(/\.(md|markdown|txt)$/i, "").replace(/^\d{4}-\d{2}-\d{2}-?/, "");
+  if (!slug) return 0;
+  try {
+    const r = await (env as { DB: D1Database }).DB
+      .prepare(`DELETE FROM wl_Comments WHERE url LIKE ?1 OR url LIKE ?2 OR url = ?3`)
+      .bind(`%/${slug}/%`, `%/${slug}`, `/${slug}`)
+      .run();
+    return r.meta?.changes ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 // 移入回收站（文章删除、文件管理删除、批量删除共用）
 async function handleRecyclePaths(env: Bindings, input: unknown, branchIn?: unknown) {
   const branch = String(branchIn || "").trim() || ghConfig(env).branch;
   const paths = normalizePaths(input);
   const results: OpResult[] = [];
   if (!paths.length) return { ok: false, error: "paths required", moved: 0, total: 0, results };
+  const { postsDir } = ghConfig(env);
   for (const p of paths) {
     if (p === RECYCLE_DIR || p.startsWith(RECYCLE_DIR + "/")) {
       results.push({ path: p, ok: false, error: "已在回收站中" });
       continue;
     }
-    const r = await movePath(env, p, `${RECYCLE_DIR}/${p}`, branch);
+    // 逐项重试（GitHub 二级限流会导致部分请求失败而丢文件），仍失败则记录明细
+    let r: { ok: boolean; moved?: string; error?: string } = { ok: false, error: "未执行" };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      r = await movePath(env, p, `${RECYCLE_DIR}/${p}`, branch);
+      if (r.ok) break;
+      await sleep(500);
+    }
     results.push({ path: p, ok: r.ok, moved: r.moved, error: r.error });
+    // 删除文章（posts 目录下的 md/markdown/txt）时同步删除其评论
+    if (r.ok && postsDir && p.startsWith(postsDir + "/")) {
+      const c = await deleteCommentsForPost(env, p);
+      if (c > 0) console.log(`recycle ${p}: removed ${c} comments`);
+    }
+    await sleep(150);
   }
   const moved = results.filter((r) => r.ok).length;
   return { ok: moved > 0, moved, total: paths.length, results };
@@ -3156,6 +3190,7 @@ async function handleRestorePaths(env: Bindings, input: unknown, branchIn?: unkn
     }
     const r = await movePath(env, p, p.slice(RECYCLE_DIR.length + 1), branch);
     results.push({ path: p, ok: r.ok, moved: r.moved, error: r.error });
+    await sleep(150);
   }
   const restored = results.filter((r) => r.ok).length;
   return { ok: restored > 0, restored, total: paths.length, results };
@@ -3171,6 +3206,7 @@ async function handlePurgePaths(env: Bindings, input: unknown, branchIn?: unknow
     const r = await deletePath(env, p, branch);
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
     results.push({ path: p, ok: r.ok && !!d.ok, error: d?.error });
+    await sleep(100);
   }
   const purged = results.filter((r) => r.ok).length;
   return { ok: purged > 0, purged, total: paths.length, results };

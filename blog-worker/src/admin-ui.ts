@@ -2656,12 +2656,15 @@ function updateBatchBar(){
 async function deleteSelectedPosts(){
   const paths=Array.from(selectedPosts);
   if(!paths.length) return;
-  if(!confirm('确认删除所选 '+paths.length+' 篇文章？将移入回收站，可恢复。')) return;
+  if(!confirm('确认删除所选 '+paths.length+' 篇文章？将移入回收站，可恢复。对应评论也会一并删除。')) return;
   opBanner('正在删除所选 '+paths.length+' 篇文章…','busy');
   const r=await api(API_BASE+'/posts/delete',{method:'POST',body:JSON.stringify({paths:paths})});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
-    postOpDone('已删除 '+(r.data.moved||0)+'/'+(r.data.total||paths.length)+' 篇（已移入回收站）', r.data, 'neutral');
+    const fails=(r.data.results||[]).filter(x=>!x.ok);
+    let msg='已删除 '+(r.data.moved||0)+'/'+(r.data.total||paths.length)+' 篇（已移入回收站）';
+    if(fails.length) msg+='，失败 '+(fails.length)+' 篇：'+fails.slice(0,3).map(x=>(x.path||'').split('/').pop()).join('、')+(fails.length>3?' 等':'')+'（可重试）';
+    postOpDone(msg, r.data, 'neutral');
     await loadPosts();
   } else opBannerEnd('批量删除失败：'+(r.data&&r.data.error||r.status),false);
 }
@@ -2860,6 +2863,8 @@ function setCommentFilter(f){
 async function loadComments(){
   const box=$('#commentList'); if(!box) return;
   box.innerHTML='<div class="empty">加载中...</div>';
+  selectedComments.clear();
+  updateCommentBatch();
   const statusParam=commentFilter==='all'?'':('&status='+commentFilter);
   const r=await api('/waline/api/comment?type=list&page=1&pageSize=100'+statusParam);
   if(r.status===401||r.status===403){ redirectLogin(); return; }
@@ -2876,8 +2881,9 @@ async function loadComments(){
     if(it.status!=='approved') ops+='<button class="wk-btn sm" data-a="approve">通过</button>';
     if(it.status!=='spam') ops+='<button class="wk-btn act sm" data-a="spam">垃圾</button>';
     ops+='<button class="wk-btn danger sm" data-a="del">删除</button>';
-    el.innerHTML='<div class="avatar">'+(it.avatar?'<img src="'+esc(it.avatar)+'">':'')+'</div>'+
-      '<div style="flex:1">'+
+    el.innerHTML='<input type="checkbox" class="cmtCheck" style="width:auto;flex-shrink:0;align-self:flex-start;margin-top:3px">'+
+      '<div class="avatar">'+(it.avatar?'<img src="'+esc(it.avatar)+'">':'')+'</div>'+
+      '<div style="flex:1;min-width:0">'+
         '<div><span class="nick">'+esc(it.nick)+'</span><span class="mail">'+esc(it.mail||'')+'</span><span class="ip">'+esc(it.ip||'')+'</span><span class="path">'+esc(it.url||'')+'</span><span class="time">'+esc(time)+'</span>'+st+'</div>'+
         '<div class="body">'+(it.comment||'')+'</div>'+
         '<div class="ops">'+ops+'</div>'+
@@ -2885,6 +2891,27 @@ async function loadComments(){
     el.dataset.id=it.objectId;
     box.appendChild(el);
   });
+}
+// ---------- 评论多选批量删除 ----------
+let selectedComments=new Set();
+function updateCommentBatch(){
+  const n=selectedComments.size;
+  const cnt=$('#cmtCount'); if(cnt) cnt.textContent=n;
+  const btn=$('#cmtBatchDel'); if(btn) btn.disabled=n===0;
+  const all=$('#cmtPickAll');
+  if(all){ const boxes=$$('#commentList .cmtCheck'); all.checked=boxes.length>0&&n===boxes.length; }
+}
+async function deleteSelectedComments(){
+  const ids=Array.from(selectedComments);
+  if(!ids.length) return;
+  if(!confirm('确认删除所选 '+ids.length+' 条评论？不可恢复。')) return;
+  let okN=0;
+  for(const id of ids){
+    try{ const r=await api('/waline/api/comment/'+id,{method:'DELETE'}); if(r.ok) okN++; }catch(e){}
+  }
+  toast('已删除 '+okN+'/'+ids.length+' 条评论', okN<ids.length);
+  selectedComments.clear();
+  loadComments();
 }
 async function onCommentAction(e){
   const btn=e.target.closest('button'); if(!btn) return;
@@ -3942,6 +3969,25 @@ document.addEventListener('DOMContentLoaded', ()=>{
   $('#upPublishBtn').onclick=publishUploadQueue;
   $('#uploadList').addEventListener('click',onUploadListClick);
   $('#commentList').addEventListener('click',onCommentAction);
+  // 评论管理：多选批量删除
+  $('#commentList').addEventListener('change',e=>{
+    const c=e.target;
+    if(!c||!c.classList||!c.classList.contains('cmtCheck')) return;
+    const card=c.closest('.wk-comment'); if(!card) return;
+    const id=card.dataset.id; if(!id) return;
+    if(c.checked) selectedComments.add(id); else selectedComments.delete(id);
+    updateCommentBatch();
+  });
+  $('#cmtPickAll').onchange=e=>{
+    const on=e.target.checked;
+    $$('#commentList .wk-comment').forEach(card=>{
+      const c=card.querySelector('.cmtCheck'); if(!c) return;
+      c.checked=on;
+      if(on) selectedComments.add(card.dataset.id); else selectedComments.delete(card.dataset.id);
+    });
+    updateCommentBatch();
+  };
+  $('#cmtBatchDel').onclick=deleteSelectedComments;
   $$('#commentFilter .wk-btn').forEach(b=>b.onclick=()=>setCommentFilter(b.dataset.f));
   $('#fileList').addEventListener('click',onFileClick);
   $('#fileList').addEventListener('click',onFileListClick);
@@ -4120,11 +4166,15 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     <div class="wk-card">
       <div class="toolbar" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
         <h3 class="wk-title" style="margin:0;border:none;padding:0">评论管理</h3>
-        <div id="commentFilter" class="filters">
-          <button class="wk-btn act sm" data-f="all">全部</button>
-          <button class="wk-btn ghost sm" data-f="waiting">待审批</button>
-          <button class="wk-btn ghost sm" data-f="approved">已通过</button>
-          <button class="wk-btn ghost sm" data-f="spam">垃圾</button>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <div id="commentFilter" class="filters">
+            <button class="wk-btn act sm" data-f="all">全部</button>
+            <button class="wk-btn ghost sm" data-f="waiting">待审批</button>
+            <button class="wk-btn ghost sm" data-f="approved">已通过</button>
+            <button class="wk-btn ghost sm" data-f="spam">垃圾</button>
+          </div>
+          <button class="wk-btn danger sm" id="cmtBatchDel" disabled>删除所选（<span id="cmtCount">0</span>）</button>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer"><input type="checkbox" id="cmtPickAll" style="width:auto">全选</label>
         </div>
       </div>
       <div id="commentList"><div class="empty">切换到此页加载评论</div></div>
