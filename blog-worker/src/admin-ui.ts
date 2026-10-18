@@ -3422,10 +3422,11 @@ function updateFileBatchBar(){
   const c=$('#filePickCount'); if(c) c.textContent=n;
   const all=$('#filePickAll');
   if(all){ const boxes=$$('#fileList .filePick'); all.checked=boxes.length>0&&n===boxes.length; }
+  ['#fileBatchRecycle','#fileBatchRestore','#fileBatchPurge'].forEach(id=>{ const b=$(id); if(b) b.disabled=n===0; });
 }
 async function fileBatchOp(kind){
   const paths=Array.from(selectedFiles);
-  if(!paths.length) return;
+  if(!paths.length){ toast('请先勾选要操作的文件'); return; }
   const conf={
     recycle:'确认将所选 '+paths.length+' 项移入回收站？',
     restore:'确认恢复所选 '+paths.length+' 项？',
@@ -3950,6 +3951,16 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if(c.checked) selectedPosts.add(p); else selectedPosts.delete(p);
     updateBatchBar();
   });
+  // 勾选 click 兜底：全量按 DOM 状态重建选中集合，防个别环境 change 事件丢失
+  $('#postList').addEventListener('click',e=>{
+    const c=e.target;
+    if(!c||!c.classList||!c.classList.contains('postCheck')) return;
+    setTimeout(()=>{
+      selectedPosts.clear();
+      $$('#postList .postCheck').forEach(x=>{ if(x.checked) selectedPosts.add(x.dataset.path); });
+      updateBatchBar();
+    },0);
+  });
   $('#pickAll').onchange=e=>{
     const on=e.target.checked;
     $$('#postList .postCheck').forEach(c=>{
@@ -3977,6 +3988,19 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const id=card.dataset.id; if(!id) return;
     if(c.checked) selectedComments.add(id); else selectedComments.delete(id);
     updateCommentBatch();
+  });
+  // 勾选 click 兜底：全量按 DOM 状态重建选中集合，防个别环境 change 事件丢失
+  $('#commentList').addEventListener('click',e=>{
+    const c=e.target;
+    if(!c||!c.classList||!c.classList.contains('cmtCheck')) return;
+    setTimeout(()=>{
+      selectedComments.clear();
+      $$('#commentList .wk-comment').forEach(card=>{
+        const x=card.querySelector('.cmtCheck');
+        if(x&&x.checked) selectedComments.add(card.dataset.id);
+      });
+      updateCommentBatch();
+    },0);
   });
   $('#cmtPickAll').onchange=e=>{
     const on=e.target.checked;
@@ -4010,6 +4034,16 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const p=c.dataset.path;
     if(c.checked) selectedFiles.add(p); else selectedFiles.delete(p);
     updateFileBatchBar();
+  });
+  // 勾选 click 兜底：全量按 DOM 状态重建选中集合，防个别环境 change 事件丢失
+  $('#fileList').addEventListener('click',e=>{
+    const c=e.target;
+    if(!c||!c.classList||!c.classList.contains('filePick')) return;
+    setTimeout(()=>{
+      selectedFiles.clear();
+      $$('#fileList .filePick').forEach(x=>{ if(x.checked) selectedFiles.add(x.dataset.path); });
+      updateFileBatchBar();
+    },0);
   });
   $('#filePickAll').onchange=e=>{
     const on=e.target.checked;
