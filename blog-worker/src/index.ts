@@ -3278,7 +3278,8 @@ function parseFrontMatter(raw: string): {
           // 兼容多种写法：2026-07-18 / 2026/7/18 / 2026.07.18 / 2026年7月18日 / 引号包裹 / 带时间时区
           const t = v.trim().replace(/^['"]|['"]$/g, "");
           const d = t.match(/(\d{4})[-/.年\s]+(\d{1,2})[-/.月\s]+(\d{1,2})/);
-          if (d) date = `${d[1]}-${d[2].padStart(2, "0")}-${d[3].padStart(2, "0")}`;
+          if (d && +d[2] >= 1 && +d[2] <= 12 && +d[3] >= 1 && +d[3] <= 31)
+            date = `${d[1]}-${d[2].padStart(2, "0")}-${d[3].padStart(2, "0")}`;
         } else if (k === "categories") {
           key = "categories";
           if (v.trim()) categories.push(...cleanList(v));
