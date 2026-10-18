@@ -2590,12 +2590,13 @@ function applyPostView(){
   if(fmt==='dated') ps=ps.filter(p=>/^\d{4}-\d{2}-\d{2}-/.test(p.name||''));
   else if(fmt==='plain') ps=ps.filter(p=>!/^\d{4}-\d{2}-\d{2}-/.test(p.name||''));
   if(q) ps=ps.filter(p=>(String(p.name||'').toLowerCase().includes(q)));
-  // 升序比较器（无日期排最后），desc 取反；同序时按文件名稳定排序
+  // 升序/降序比较器（无日期都排最后），同序时按文件名稳定排序
   const dateAsc=(a,b)=>((a.date||'')==='')-((b.date||'')==='')||String(a.date||'').localeCompare(String(b.date||''));
+  const dateDesc=(a,b)=>((a.date||'')==='')-((b.date||'')==='')||String(b.date||'').localeCompare(String(a.date||''));
   const nameCmp=(a,b)=>String(a.name||'').localeCompare(String(b.name||''));
   ps.sort((a,b)=>{
     if(sortV==='date-asc') return dateAsc(a,b)||nameCmp(a,b);
-    if(sortV==='date-desc') return -dateAsc(a,b)||nameCmp(a,b);
+    if(sortV==='date-desc') return dateDesc(a,b)||nameCmp(a,b);
     if(sortV==='size-asc') return (a.size||0)-(b.size||0)||nameCmp(a,b);
     return (b.size||0)-(a.size||0)||nameCmp(a,b); // size-desc
   });
