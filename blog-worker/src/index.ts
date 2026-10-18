@@ -41,6 +41,7 @@ app.use("*", async (c, next) => {
       /* ignore */
     }
   }
+  await maybeResetAdmin(env); // 「重置后台账号」工作流注入 ADMIN_RESET_ONCE 后，首个请求执行重置
   await next();
 });
 
@@ -215,6 +216,48 @@ async function adminPayload(
 
 const ADMIN_COOKIE = (token: string) =>
   `bl_token=${encodeURIComponent(token)};path=/;max-age=2592000;SameSite=Lax`;
+
+// 一次性重置后台账号：「重置后台账号」工作流部署 Worker 时注入 ADMIN_RESET_ONCE 标志，
+// 首个请求触发执行（Worker 自身有 D1 写权限，不依赖 CF_API_TOKEN 的 D1 权限）。
+// 执行后把标志记入 bl_ResetFlag，同一部署内不会重复执行；正常部署不带该变量则完全不触发。
+let adminResetDone = false;
+async function maybeResetAdmin(env: Bindings): Promise<void> {
+  const flag = (env as { ADMIN_RESET_ONCE?: string }).ADMIN_RESET_ONCE;
+  if (!flag || adminResetDone) return;
+  adminResetDone = true;
+  const db = env.DB;
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS "bl_ResetFlag" (
+          "id" INTEGER PRIMARY KEY,
+          "val" TEXT NOT NULL DEFAULT ''
+        )`,
+      )
+      .run();
+    const done = await db
+      .prepare(`SELECT val FROM "bl_ResetFlag" WHERE id = 1`)
+      .first<{ val: string }>();
+    if (done?.val === flag) return; // 本次部署已执行过重置
+    await ensureAdminTable(db);
+    await db.prepare(`DELETE FROM "bl_Admin"`).run();
+    await db
+      .prepare(`INSERT INTO "bl_Admin" (username, password) VALUES (?, ?)`)
+      .bind("admin", await hashPassword("admin"))
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO "bl_ResetFlag" (id, val) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET val = excluded.val`,
+      )
+      .bind(flag)
+      .run();
+    console.log("ADMIN_RESET_ONCE: 后台账号已重置为 admin/admin");
+  } catch (e) {
+    console.error("ADMIN_RESET_ONCE failed", e);
+    adminResetDone = false; // 失败允许下个请求重试
+  }
+}
 
 // 后台所有 API 统一鉴权：bl_token 有效则注入 administrator 身份，路由内 isAdmin 检查照常生效
 app.use("/admin/api/*", async (c, next) => {
