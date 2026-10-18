@@ -2565,7 +2565,9 @@ let rawPosts=[];
 function fillPostFilterOptions(){
   const cats=[...new Set(rawPosts.flatMap(p=>p.categories||[]))].sort();
   const tags=[...new Set(rawPosts.flatMap(p=>p.tags||[]))].sort();
-  const fc=$('#postFCat'), ft=$('#postFTag');
+  const exts=[...new Set(rawPosts.map(p=>((String(p.name||'').split('.').pop()||'').toLowerCase()))).values()].filter(Boolean).sort();
+  const extLabel=e=>({md:'MD',markdown:'MARKDOWN',txt:'TXT'}[e]||e.toUpperCase());
+  const fc=$('#postFCat'), ft=$('#postFTag'), ff=$('#postFFmt');
   if(fc){
     const keep=fc.value;
     fc.innerHTML='<option value="">全部</option>'+cats.map(c=>'<option>'+esc(c)+'</option>').join('');
@@ -2575,6 +2577,11 @@ function fillPostFilterOptions(){
     const keep=ft.value;
     ft.innerHTML='<option value="">全部</option>'+tags.map(t=>'<option>'+esc(t)+'</option>').join('');
     if([...ft.options].some(o=>o.value===keep)) ft.value=keep;
+  }
+  if(ff){
+    const keep=ff.value;
+    ff.innerHTML='<option value="">全部格式</option>'+exts.map(e=>'<option value="'+esc(e)+'">'+extLabel(e)+'</option>').join('');
+    if([...ff.options].some(o=>o.value===keep)) ff.value=keep;
   }
 }
 function applyPostView(){
@@ -2587,8 +2594,7 @@ function applyPostView(){
   let ps=rawPosts.slice();
   if(cat) ps=ps.filter(p=>(p.categories||[]).some(c=>c===cat));
   if(tag) ps=ps.filter(p=>(p.tags||[]).some(t=>t===tag));
-  if(fmt==='dated') ps=ps.filter(p=>/^\d{4}-\d{2}-\d{2}-/.test(p.name||''));
-  else if(fmt==='plain') ps=ps.filter(p=>!/^\d{4}-\d{2}-\d{2}-/.test(p.name||''));
+  if(fmt) ps=ps.filter(p=>String(p.name||'').toLowerCase().endsWith('.'+fmt));
   if(q) ps=ps.filter(p=>(String(p.name||'').toLowerCase().includes(q)));
   // 升序/降序比较器（无日期都排最后），同序时按文件名稳定排序
   const dateAsc=(a,b)=>((a.date||'')==='')-((b.date||'')==='')||String(a.date||'').localeCompare(String(b.date||''));
@@ -4035,22 +4041,18 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
       </div>
       <div class="filters" id="postFilterBar" style="margin:10px 0 0;flex-wrap:wrap;gap:8px">
         <span class="wk-label" style="margin:0">排序</span>
-        <select class="wk-input" id="postSort" onchange="applyPostView()" style="width:auto;padding:4px 8px">
+        <select class="wk-input" id="postSort" onchange="applyPostView()" style="width:auto;max-width:150px;padding:4px 8px">
           <option value="date-desc">日期 倒序（新→旧）</option>
           <option value="date-asc">日期 正序（旧→新）</option>
           <option value="size-asc">大小 正序（小→大）</option>
           <option value="size-desc">大小 倒序（大→小）</option>
         </select>
         <span class="wk-label" style="margin:0 0 0 6px">分类</span>
-        <select class="wk-input" id="postFCat" onchange="applyPostView()" style="width:auto;padding:4px 8px"><option value="">全部</option></select>
+        <select class="wk-input" id="postFCat" onchange="applyPostView()" style="width:auto;max-width:130px;padding:4px 8px"><option value="">全部</option></select>
         <span class="wk-label" style="margin:0 0 0 6px">标签</span>
-        <select class="wk-input" id="postFTag" onchange="applyPostView()" style="width:auto;padding:4px 8px"><option value="">全部</option></select>
+        <select class="wk-input" id="postFTag" onchange="applyPostView()" style="width:auto;max-width:130px;padding:4px 8px"><option value="">全部</option></select>
         <span class="wk-label" style="margin:0 0 0 6px">格式</span>
-        <select class="wk-input" id="postFFmt" onchange="applyPostView()" style="width:auto;padding:4px 8px">
-          <option value="">全部</option>
-          <option value="dated">日期前缀文件名</option>
-          <option value="plain">无日期前缀</option>
-        </select>
+        <select class="wk-input" id="postFFmt" onchange="applyPostView()" style="width:auto;max-width:130px;padding:4px 8px"><option value="">全部格式</option></select>
         <input class="wk-input" id="postFQ" placeholder="搜索标题 / 文件名" oninput="applyPostView()" style="width:160px;padding:4px 8px">
       </div>
       <div class="filters hidden" id="batchBar" style="margin:10px 0 0">
