@@ -377,10 +377,58 @@ const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&
 const api = async (url, opt={}) => {
   const h = Object.assign({'Content-Type':'application/json'}, opt.headers||{});
   if (token) h['Authorization'] = 'Bearer ' + token;
-  const r = await fetch(url, Object.assign({}, opt, {headers:h}));
+  // 30 秒超时：请求挂起时不再无限等待，前端能拿到明确错误
+  const ctl = (typeof AbortController!=='undefined') ? new AbortController() : null;
+  const t = ctl ? setTimeout(()=>{ try{ ctl.abort(); }catch(e){} }, 30000) : null;
+  let r;
+  try {
+    r = await fetch(url, Object.assign({}, opt, {headers:h, signal: ctl?ctl.signal:undefined}));
+  } catch(e) {
+    if(t) clearTimeout(t);
+    return { ok:false, status:0, data:{ error:'网络请求失败或超时（30 秒），请检查网络后重试' } };
+  }
+  if(t) clearTimeout(t);
   let d = null; try { d = await r.json(); } catch(e){}
   return { ok: r.ok, status: r.status, data: d };
 };
+
+// 自定义确认弹窗：替代原生 confirm（浏览器连续弹窗后会被用户勾选「阻止更多对话框」屏蔽，
+// 导致删除等操作静默无反应；自定义弹窗不受影响），Promise 化：await askConfirm('...')
+function askConfirm(msg){
+  return new Promise((resolve)=>{
+    let m=$('#askMask');
+    if(!m){
+      m=document.createElement('div'); m.id='askMask';
+      m.style.cssText='position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:20px';
+      m.innerHTML='<div style="background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:3px;max-width:430px;width:100%;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.25)">'+
+        '<div id="askMsg" style="font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word"></div>'+
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">'+
+        '<button class="wk-btn ghost sm" id="askNo">取消</button>'+
+        '<button class="wk-btn sm" id="askYes">确认</button></div></div>';
+      document.body.appendChild(m);
+      // Esc / 点遮罩 = 取消（只注册一次）
+      document.addEventListener('keydown',function(ev){
+        const mm=$('#askMask');
+        if(mm && mm.style.display!=='none' && ev.key==='Escape'){ mm.style.display='none'; if(mm.__resolve) mm.__resolve(false); }
+      });
+      m.addEventListener('click',function(ev){ if(ev.target===m){ m.style.display='none'; if(m.__resolve) m.__resolve(false); } });
+    }
+    const done=(v)=>{ m.style.display='none'; m.__resolve=null; const y=$('#askYes'); if(y) y.disabled=false; resolve(v); };
+    m.__resolve=done;
+    $('#askNo').onclick=()=>done(false);
+    $('#askYes').onclick=()=>done(true);
+    $('#askMsg').textContent=msg;
+    m.style.display='flex';
+    setTimeout(()=>{ try{ $('#askYes').focus(); }catch(e){} },30);
+  });
+}
+// 静默收起操作横幅（加载类操作完成且无需提示时用）
+function opBannerHide(){
+  if(opBannerTimer){ clearTimeout(opBannerTimer); opBannerTimer=null; }
+  if(opBannerWatchdog){ clearTimeout(opBannerWatchdog); opBannerWatchdog=null; }
+  opBannerBusy=false;
+  const b=$('#globalBuildBanner'); if(b) b.classList.add('hidden');
+}
 
 function toast(msg, isErr){
   let el = $('#msg');
@@ -492,7 +540,7 @@ async function loadThemes(){
 async function switchTheme(i){
   const t = themeListData[i];
   if(!t) return;
-  if(!confirm('确认切换主题为「' + t.name + '」？将修改 _config.yml 并触发部署重建站点。')) return;
+  if(!await askConfirm('确认切换主题为「' + t.name + '」？将修改 _config.yml 并触发部署重建站点。')) return;
   const msg = $('#themeMsg');
   if(msg){ msg.className='msg'; msg.textContent='切换中...'; }
   const r = await api('/admin/api/themes/switch', { method:'POST', body: JSON.stringify({ name: t.name }) });
@@ -1177,7 +1225,7 @@ function aiFitHeight(){
 // 保存系统提示词（立即生效，改动过大可能导致 AI 不好用）
 async function aiSavePrompt(){
   const ta = $('#aiPrompt'); if(!ta) return;
-  if(!confirm('保存后立即生效。\\n\\n系统提示词会直接影响 AI 的工具调用与回答方式，改动不当可能导致 AI 无法正常使用，请确认保存。')) return;
+  if(!await askConfirm('保存后立即生效。\\n\\n系统提示词会直接影响 AI 的工具调用与回答方式，改动不当可能导致 AI 无法正常使用，请确认保存。')) return;
   const r = await api('/admin/api/ai/settings', { method:'PUT', body: JSON.stringify({ prompt: ta.value }) });
   if(r.ok && r.data){
     aiPrompt = String(r.data.prompt || '').trim() || aiPromptDefault;
@@ -1185,9 +1233,9 @@ async function aiSavePrompt(){
   } else toast('保存失败', true);
 }
 // 还原为内置默认提示词（需再点「保存」才生效）
-function aiResetPrompt(){
+async function aiResetPrompt(){
   const ta = $('#aiPrompt'); if(!ta) return;
-  if(!confirm('还原为内置默认系统提示词？还原后需点「保存」才会生效。')) return;
+  if(!await askConfirm('还原为内置默认系统提示词？还原后需点「保存」才会生效。')) return;
   ta.value = aiPromptDefault || '';
 }
 async function loadAiConversations(){
@@ -1283,7 +1331,7 @@ function aiRenameConv(){
   aiSaveConversation();
 }
 async function aiDelConv(id){
-  if(!confirm('确认删除该会话？')) return;
+  if(!await askConfirm('确认删除该会话？')) return;
   const r = await api('/admin/api/ai/conversation?id=' + id, { method:'DELETE' });
   if(r.ok){ if(aiConvId === id) aiNewChat(); else loadAiConversations(); }
   else toast('删除失败', true);
@@ -1430,11 +1478,11 @@ function renderAiMessages(){
   scrollAiBottom();
 }
 // 撤回：删除该条及其之后的消息，并把该条内容放回输入框
-function aiRecall(i){
+async function aiRecall(i){
   if(aiStreaming){ toast('正在回复中，请稍候', true); return; }
   if(i < 0 || i >= aiConvMessages.length) return;
   const m = aiConvMessages[i] || {};
-  if(!confirm('撤回这条及之后的消息？内容会回到输入框。')) return;
+  if(!await askConfirm('撤回这条及之后的消息？内容会回到输入框。')) return;
   const text = (typeof m.content === 'string') ? m.content : '';
   aiConvMessages = aiConvMessages.slice(0, i);
   renderAiMessages();
@@ -2367,7 +2415,7 @@ async function saveSecret(){
   }
 }
 async function delSecret(name){
-  if(!confirm('确认删除密钥 {' + name + '} ？')) return;
+  if(!await askConfirm('确认删除密钥 {' + name + '} ？')) return;
   const r = await api('/admin/api/secrets?name=' + encodeURIComponent(name), { method:'DELETE' });
   if(r.ok){ toast('已删除'); loadSecrets(); } else toast('删除失败', true);
 }
@@ -2465,12 +2513,12 @@ async function loadSubscribers(){
   }catch(e){ if(box) box.innerHTML = '<div class="empty">加载失败</div>'; }
 }
 async function delSubscriber(id){
-  if(!confirm('确认删除该订阅者？')) return;
+  if(!await askConfirm('确认删除该订阅者？')) return;
   const r = await api('/admin/api/subscribe/subscriber?id=' + id, { method:'DELETE' });
   if(r.ok){ toast('已删除'); loadSubscribers(); } else toast('删除失败', true);
 }
 async function approveSubscriber(id){
-  if(!confirm('确认通过该订阅者？通过后立即变为「已确认」，无需对方点邮件确认。')) return;
+  if(!await askConfirm('确认通过该订阅者？通过后立即变为「已确认」，无需对方点邮件确认。')) return;
   const r = await api('/admin/api/subscribe/approve', { method:'POST', body: JSON.stringify({ id: id }) });
   if(r.ok){ toast('已通过'); loadSubscribers(); } else toast('操作失败：' + ((r.data && r.data.error) || '未知错误'), true);
 }
@@ -2493,7 +2541,7 @@ async function broadcastSubscribe(){
   const v = id => { const el=$('#'+id); return el ? el.value : ''; };
   const subject = v('bcSubject').trim(), body = v('bcBody').trim();
   if(!subject || !body){ toast('请填写主题和正文', true); return; }
-  if(!confirm('确认发送给全部已确认订阅者？')) return;
+  if(!await askConfirm('确认发送给全部已确认订阅者？')) return;
   toast('发送中，请稍候...');
   const r = await api('/admin/api/subscribe/send', { method:'POST', body: JSON.stringify({ subject: subject, body: body }) });
   if(r.ok){
@@ -2655,10 +2703,13 @@ function updateBatchBar(){
 }
 async function deleteSelectedPosts(){
   const paths=Array.from(selectedPosts);
-  if(!paths.length) return;
-  if(!confirm('确认删除所选 '+paths.length+' 篇文章？将移入回收站，可恢复。对应评论也会一并删除。')) return;
-  opBanner('正在删除所选 '+paths.length+' 篇文章…','busy');
+  if(!paths.length){ toast('请先勾选要删除的文章'); return; }
+  if(!await askConfirm('确认删除所选 '+paths.length+' 篇文章？\\n将移入回收站（可恢复），对应评论也会一并删除。')) return;
+  const delBtn=$('#batchDelBtn');
+  if(delBtn){ delBtn.disabled=true; delBtn.textContent='删除中…'; }
+  opBanner('正在删除所选 '+paths.length+' 篇文章…（文章越多耗时越长，请勿关闭页面）','busy');
   const r=await api(API_BASE+'/posts/delete',{method:'POST',body:JSON.stringify({paths:paths})});
+  if(delBtn){ delBtn.disabled=false; delBtn.textContent='删除所选'; }
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
     const fails=(r.data.results||[]).filter(x=>!x.ok);
@@ -2713,16 +2764,16 @@ function onUploadListClick(e){
   uploadQueue=uploadQueue.filter(function(x){ return x.name!==btn.dataset.name; });
   renderUploadList();
 }
-function clearUploadQueue(){
+async function clearUploadQueue(){
   if(!uploadQueue.length) return;
-  if(!confirm('清空已选的 '+uploadQueue.length+' 个文件？')) return;
+  if(!await askConfirm('清空已选的 '+uploadQueue.length+' 个文件？')) return;
   uploadQueue=[];
   renderUploadList();
 }
 async function publishUploadQueue(){
   if(!uploadQueue.length){ toast('请先选择文件',true); return; }
   const n=uploadQueue.length;
-  if(!confirm('确定一键发布 '+n+' 篇文章到 GitHub 吗？')) return;
+  if(!await askConfirm('确定一键发布 '+n+' 篇文章到 GitHub 吗？')) return;
   opBanner('正在上传 '+n+' 篇文章…','busy');
   const out=uploadQueue.map(function(f){ return {name:f.name, content:f.content}; });
   const r=await api(API_BASE+'/posts/upload',{method:'POST',body:JSON.stringify({files:out})});
@@ -2745,9 +2796,16 @@ function onListClick(e){
 }
 async function openEdit(path){
   editingPath=path;
+  opBanner('正在加载文章内容…','busy');
   const r=await api(API_BASE+'/post?path='+encodeURIComponent(path));
   if(r.status===401){ redirectLogin(); return; }
-  if(!r.ok){ toast('加载失败 '+r.status,true); return; }
+  if(!r.ok){
+    editingPath='';
+    opBannerEnd('加载文章失败：'+((r.data&&r.data.error)||r.status||'网络异常'),false);
+    toast('加载文章失败：'+((r.data&&r.data.error)||r.status||'网络异常'),true);
+    return;
+  }
+  opBannerHide();
   const p=r.data.post||{};
   $('#title').value=p.title||'';
   $('#date').value=(p.date||localToday()).slice(0,10);
@@ -2787,7 +2845,7 @@ async function savePost(){
   } else opBannerEnd('保存失败：'+(r.data&&r.data.error||r.status),false);
 }
 async function delPost(path,name){
-  if(!confirm('确认删除文章「'+name+'」？将移入回收站，可恢复。')) return;
+  if(!await askConfirm('确认删除文章「'+name+'」？将移入回收站，可恢复。')) return;
   opBanner('正在删除文章「'+name+'」…','busy');
   const r=await api(API_BASE+'/post?path='+encodeURIComponent(path),{method:'DELETE'});
   if(r.status===401){ redirectLogin(); return; }
@@ -2903,12 +2961,18 @@ function updateCommentBatch(){
 }
 async function deleteSelectedComments(){
   const ids=Array.from(selectedComments);
-  if(!ids.length) return;
-  if(!confirm('确认删除所选 '+ids.length+' 条评论？不可恢复。')) return;
+  if(!ids.length){ toast('请先勾选要删除的评论'); return; }
+  if(!await askConfirm('确认删除所选 '+ids.length+' 条评论？\\n此操作不可恢复。')) return;
+  const btn=$('#cmtBatchDel');
+  const btnHtml=btn?btn.innerHTML:'';
+  if(btn){ btn.disabled=true; btn.textContent='删除中…'; }
+  opBanner('正在删除所选 '+ids.length+' 条评论…','busy');
   let okN=0;
   for(const id of ids){
     try{ const r=await api('/waline/api/comment/'+id,{method:'DELETE'}); if(r.ok) okN++; }catch(e){}
   }
+  if(btn){ btn.disabled=false; btn.innerHTML=btnHtml; }
+  opBannerHide();
   toast('已删除 '+okN+'/'+ids.length+' 条评论', okN<ids.length);
   selectedComments.clear();
   loadComments();
@@ -2917,7 +2981,7 @@ async function onCommentAction(e){
   const btn=e.target.closest('button'); if(!btn) return;
   const card=btn.closest('.wk-comment'); if(!card) return;
   const id=card.dataset.id, a=btn.dataset.a; if(!id) return;
-  if(a==='del'&&!confirm('确认删除该评论？')) return;
+  if(a==='del'&&!await askConfirm('确认删除该评论？')) return;
   if(a==='approve'||a==='spam'){
     const r=await api('/waline/api/comment/'+id,{method:'PUT',body:JSON.stringify({status:a==='approve'?'approved':'spam'})});
     if(r.ok) loadComments(); else toast('操作失败',true);
@@ -3137,9 +3201,9 @@ async function triggerBuild(){
   const st=await api(API_BASE+'/build');
   if(st.ok&&st.data&&st.data.running){
     const n=(st.data.runs||[]).length;
-    if(!confirm('已有一个部署正在进行中'+(n>1?'（最近有 '+n+' 次构建）':'')+'，再触发一个会造成重复构建。确定还要运行吗？')) return;
+    if(!await askConfirm('已有一个部署正在进行中'+(n>1?'（最近有 '+n+' 次构建）':'')+'，再触发一个会造成重复构建。确定还要运行吗？')) return;
   }
-  if(!confirm('确定运行部署工作流吗？将重建整个站点。')) return;
+  if(!await askConfirm('确定运行部署工作流吗？将重建整个站点。')) return;
   const r=await api(API_BASE+'/build/trigger',{method:'POST'});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
@@ -3161,7 +3225,7 @@ async function triggerSelectedWorkflow(){
   const wid=sel.value;
   if(!wid){ toast('请先选择要运行的工作流',true); return; }
   const label=wfLabel({workflow:wid});
-  if(!confirm('确定运行「'+label+'」工作流吗？')) return;
+  if(!await askConfirm('确定运行「'+label+'」工作流吗？')) return;
   const r=await api(API_BASE+'/workflows/trigger',{method:'POST',body:JSON.stringify({workflow_id:wid})});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
@@ -3432,7 +3496,7 @@ async function fileBatchOp(kind){
     restore:'确认恢复所选 '+paths.length+' 项？',
     purge:'确认彻底删除所选 '+paths.length+' 项？此操作不可恢复！'
   }[kind];
-  if(!confirm(conf)) return;
+  if(!await askConfirm(conf)) return;
   const key={recycle:'moved',restore:'restored',purge:'purged'}[kind];
   const label={recycle:'移入回收站',restore:'恢复',purge:'彻底删除'}[kind];
   opBanner('正在'+label+' '+paths.length+' 项…','busy');
@@ -3448,7 +3512,7 @@ async function onFileClick(e){
   const li=btn.closest('li'); if(!li) return;
   const path=li.dataset.path, name=li.dataset.name, a=btn.dataset.a;
   if(a==='zip'){
-    if(!confirm('解压「'+name+'」到当前目录？\\n小于 50MB 直接解压，大于 50MB 会触发 GitHub 工作流异步解压。')) return;
+    if(!await askConfirm('解压「'+name+'」到当前目录？\\n小于 50MB 直接解压，大于 50MB 会触发 GitHub 工作流异步解压。')) return;
     const btn0=btn.textContent; btn.disabled=true; btn.textContent='解压中...';
     opBanner('正在解压「'+name+'」…','busy');
     const r=await api(API_BASE+'/unzip-path',{method:'POST',body:JSON.stringify({path,branch:curBranch()})});
@@ -3465,7 +3529,7 @@ async function onFileClick(e){
     return;
   }
   if(a==='del'){
-    if(!confirm('确认删除「'+name+'」？将移入回收站，可恢复。')) return;
+    if(!await askConfirm('确认删除「'+name+'」？将移入回收站，可恢复。')) return;
     opBanner('正在删除「'+name+'」…','busy');
     const r=await api(API_BASE+'/files/recycle',{method:'POST',body:JSON.stringify({paths:[path],branch:curBranch()})});
     if(r.status===401){ redirectLogin(); return; }
@@ -3486,7 +3550,7 @@ async function onFileClick(e){
     return;
   }
   if(a==='purge'){
-    if(!confirm('确认彻底删除「'+name+'」？此操作不可恢复！')) return;
+    if(!await askConfirm('确认彻底删除「'+name+'」？此操作不可恢复！')) return;
     opBanner('正在彻底删除「'+name+'」…','busy');
     const r=await api(API_BASE+'/files/purge',{method:'POST',body:JSON.stringify({paths:[path],branch:curBranch()})});
     if(r.status===401){ redirectLogin(); return; }
@@ -3798,7 +3862,7 @@ async function clonePollTick(target){
   if(latest.conclusion==='success') loadFiles();
 }
 async function cloneRepoFromUrl(){
-  if(!confirm('克隆一个外部仓库？\\n将自动触发 GitHub 工作流完成（约 10 秒），目标目录已存在且非空时会中止。')) return;
+  if(!await askConfirm('克隆一个外部仓库？\\n将自动触发 GitHub 工作流完成（约 10 秒），目标目录已存在且非空时会中止。')) return;
   const repo=prompt('输入要克隆的仓库（owner/repo 或完整 URL），例如 Hexo 主题：');
   if(!repo||!repo.trim()) return;
   const slug=(repo.trim().split('/').filter(Boolean).pop()||'repo').replace(/\.git$/,'');
