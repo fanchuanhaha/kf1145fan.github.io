@@ -378,8 +378,8 @@ app.post("/api/admin/logout", (c) => {
   return c.json({ ok: true });
 });
 
-// 修改管理员密码（需先登录）
-app.post("/api/admin/password", async (c) => {
+// 修改管理员账号（用户名 / 密码，需先登录并验证旧密码；两者都可独立修改）
+app.post("/api/admin/account", async (c) => {
   const env = c.env as Bindings;
   const p = await adminPayload(adminCookieToken(c), env.JWT_SECRET);
   if (!p) return json({ ok: false, error: "unauthorized" }, 401);
@@ -390,24 +390,49 @@ app.post("/api/admin/password", async (c) => {
   const newPassword = String(
     (body as { new_password?: unknown }).new_password || "",
   );
-  if (!oldPassword || !newPassword)
-    return json({ ok: false, error: "请输入旧密码和新密码" }, 400);
-  if (newPassword.length < 6)
+  const newUsername = String(
+    (body as { new_username?: unknown }).new_username || "",
+  ).trim();
+  if (!oldPassword) return json({ ok: false, error: "请输入旧密码" }, 400);
+  if (!newUsername && !newPassword)
+    return json({ ok: false, error: "没有需要修改的内容" }, 400);
+  if (newPassword && newPassword.length < 6)
     return json({ ok: false, error: "新密码至少 6 位" }, 400);
   const db = env.DB;
   const user = await db
-    .prepare(`SELECT password FROM "bl_Admin" WHERE id = ?`)
+    .prepare(`SELECT username, password FROM "bl_Admin" WHERE id = ?`)
     .bind(p.id)
-    .first<{ password: string }>();
+    .first<{ username: string; password: string }>();
+  // 旧密码错误用 403（401 会让前端跳回登录页）
   if (!user || !(await verifyPassword(oldPassword, user.password)))
-    return json({ ok: false, error: "旧密码错误" }, 401);
-  await db
-    .prepare(
-      `UPDATE "bl_Admin" SET password = ?, updatedAt = datetime('now') WHERE id = ?`,
-    )
-    .bind(await hashPassword(newPassword), p.id)
-    .run();
-  return json({ ok: true });
+    return json({ ok: false, error: "旧密码错误" }, 403);
+  if (newUsername && newUsername !== user.username) {
+    if (newUsername.length < 2 || newUsername.length > 32)
+      return json({ ok: false, error: "用户名需为 2-32 个字符" }, 400);
+    const dup = await db
+      .prepare(`SELECT id FROM "bl_Admin" WHERE username = ? AND id != ?`)
+      .bind(newUsername, p.id)
+      .first();
+    if (dup) return json({ ok: false, error: "该用户名已被占用" }, 400);
+  }
+  const sets: string[] = [];
+  const args: unknown[] = [];
+  if (newUsername && newUsername !== user.username) {
+    sets.push("username = ?");
+    args.push(newUsername);
+  }
+  if (newPassword) {
+    sets.push("password = ?");
+    args.push(await hashPassword(newPassword));
+  }
+  if (sets.length) {
+    sets.push(`updatedAt = datetime('now')`);
+    await db
+      .prepare(`UPDATE "bl_Admin" SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...args, p.id)
+      .run();
+  }
+  return json({ ok: true, username: newUsername || user.username });
 });
 
 // ---------- 3.5 访问量统计 API ----------

@@ -757,22 +757,29 @@ async function saveWorkflowMode(){
   }
 }
 
-// 管理员账号：修改密码（独立管理员体系）
-async function changeAdminPassword(){
+// 管理员账号：修改用户名 / 密码（独立管理员体系，两者都可独立修改）
+async function changeAdminAccount(){
   const m = $('#pwMsg');
+  const u = ($('#acUser').value||'').trim();
   const o = $('#pwOld').value, n = $('#pwNew').value, n2 = $('#pwNew2').value;
-  if(!o || !n){ if(m){ m.className='msg err'; m.textContent='请输入旧密码和新密码'; } return; }
-  if(n !== n2){ if(m){ m.className='msg err'; m.textContent='两次输入的新密码不一致'; } return; }
-  const r = await api('/api/admin/password', { method:'POST', body: JSON.stringify({ old_password:o, new_password:n }) });
+  const err = t => { if(m){ m.className='msg err'; m.textContent=t; } };
+  if(!o){ err('请输入旧密码以验证身份'); return; }
+  if(n !== n2){ err('两次输入的新密码不一致'); return; }
+  if(!u && !n){ err('没有需要修改的内容'); return; }
+  const payload = { old_password:o };
+  if(u) payload.new_username = u;
+  if(n) payload.new_password = n;
+  const r = await api('/api/admin/account', { method:'POST', body: JSON.stringify(payload) });
   if(r.status === 401){ redirectLogin(); return; }
-  if(m){
-    if(r.ok && r.data && r.data.ok){
-      m.className='msg ok'; m.textContent='密码已修改，下次登录使用新密码';
-      $('#pwOld').value=''; $('#pwNew').value=''; $('#pwNew2').value='';
-      toast('管理员密码已修改');
-    } else {
-      m.className='msg err'; m.textContent=(r.data && r.data.error) || '修改失败';
-    }
+  if(r.ok && r.data && r.data.ok){
+    const nu = r.data.username || u;
+    if(m){ m.className='msg ok'; m.textContent='已保存，下次登录使用新用户名 / 密码'; }
+    $('#pwOld').value=''; $('#pwNew').value=''; $('#pwNew2').value='';
+    const au=$('#acUser'); if(au) au.value=nu;
+    const un=$('#userName'); if(un) un.textContent=nu||'管理员';
+    toast('管理员账号已保存');
+  } else {
+    err((r.data && r.data.error) || '修改失败');
   }
 }
 
@@ -3796,6 +3803,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
   fetch('/api/admin/me').then(r=>r.json()).then(d=>{
     if(!d||!d.ok){ redirectLogin(); return; }
     $('#userName').textContent=d.username||'管理员';
+    const au=$('#acUser'); if(au) au.value=d.username||'';
     if(window.__INITIAL__==='write'){
       enterWritePage();
     } else {
@@ -4369,31 +4377,35 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         </div>
         <div class="msg" id="adminMsg"></div>
         <div class="msg" id="siteMsg"></div>
-      </div>
-    </details>
 
-    <details class="wk-collapse">
-      <summary>管理员账号</summary>
-      <div class="wk-collapse-body">
-        <p class="wk-label" style="margin-top:0">博客后台的独立登录账号（用户名 + 密码，与评论区账号无关）。修改密码后当前登录保持有效，下次登录使用新密码。<br>忘记密码？到 GitHub 仓库的 Actions 页手动运行「重置后台账号」工作流，账号密码会重置为 <b>admin / admin</b>（重置后登录页会重新出现「创建管理员」入口，建议登录后立即改密码）。</p>
-        <div class="wk-row">
-          <div style="flex:1">
-            <label class="wk-label">旧密码</label>
-            <input class="wk-input" id="pwOld" type="password" autocomplete="current-password">
+        <!-- 管理员账号（用户名 / 密码，与评论区账号无关） -->
+        <div style="border-top:1px solid var(--border);margin:16px 0 0;padding-top:14px">
+          <p class="wk-label" style="margin-top:0"><b>管理员账号</b>：博客后台的独立登录账号（用户名 + 密码，与评论区账号无关）。用户名和密码都可修改，修改后当前登录保持有效，下次登录使用新的用户名 / 密码。<br>忘记密码？到 GitHub 仓库的 Actions 页手动运行「重置后台账号」工作流，账号密码会重置为 <b>admin / admin</b>（重置后登录页会重新出现「创建管理员」入口，建议登录后立即修改）。</p>
+          <div class="wk-row">
+            <div style="flex:1">
+              <label class="wk-label">用户名</label>
+              <input class="wk-input" id="acUser" autocomplete="username" placeholder="登录用户名">
+            </div>
+            <div style="flex:1">
+              <label class="wk-label">旧密码（验证身份）</label>
+              <input class="wk-input" id="pwOld" type="password" autocomplete="current-password">
+            </div>
           </div>
-          <div style="flex:1">
-            <label class="wk-label">新密码</label>
-            <input class="wk-input" id="pwNew" type="password" autocomplete="new-password" placeholder="至少 6 位">
+          <div class="wk-row">
+            <div style="flex:1">
+              <label class="wk-label">新密码（留空表示不修改）</label>
+              <input class="wk-input" id="pwNew" type="password" autocomplete="new-password" placeholder="至少 6 位">
+            </div>
+            <div style="flex:1">
+              <label class="wk-label">确认新密码</label>
+              <input class="wk-input" id="pwNew2" type="password" autocomplete="new-password">
+            </div>
           </div>
-          <div style="flex:1">
-            <label class="wk-label">确认新密码</label>
-            <input class="wk-input" id="pwNew2" type="password" autocomplete="new-password">
+          <div class="filters" style="margin:14px 0 0">
+            <button class="wk-btn sm" onclick="changeAdminAccount()">保存账号修改</button>
           </div>
+          <div class="msg" id="pwMsg"></div>
         </div>
-        <div class="filters" style="margin:14px 0 0">
-          <button class="wk-btn sm" onclick="changeAdminPassword()">修改密码</button>
-        </div>
-        <div class="msg" id="pwMsg"></div>
       </div>
     </details>
 
