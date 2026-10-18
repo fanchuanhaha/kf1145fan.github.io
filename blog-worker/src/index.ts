@@ -2735,27 +2735,36 @@ async function handleListPosts(env: Bindings): Promise<Response> {
     const data = (await res.json()) as any[];
     const files = (data || []).filter((f) => f.name?.endsWith(".md"));
 
-    // 并行读取每篇 front matter，提取分类/标签/日期
-    const posts = await Promise.all(files.map(async (f) => {
+    // 分批读取每篇 front matter（全并发会触发 GitHub 二级限流导致部分文章丢日期、排序错乱）
+    const fetchMeta = async (f: any) => {
       let categories: string[] = [];
       let tags: string[] = [];
       let date = "";
-      try {
-        const g = await fetch(`https://api.github.com/repos/${repo}/contents/${encodeURIComponent(f.path)}`, { headers });
-        if (g.ok) {
-          const d = (await g.json()) as any;
-          const raw = decodeURIComponent(escape(atob(d.content)));
-          const parsed = parseFrontMatter(raw);
-          categories = parsed.categories || [];
-          tags = parsed.tags || [];
-          date = parsed.date || "";
-        }
-      } catch {}
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const g = await fetch(`https://api.github.com/repos/${repo}/contents/${encodeURIComponent(f.path)}`, { headers });
+          if (g.ok) {
+            const d = (await g.json()) as any;
+            const raw = decodeURIComponent(escape(atob(d.content)));
+            const parsed = parseFrontMatter(raw);
+            categories = parsed.categories || [];
+            tags = parsed.tags || [];
+            date = parsed.date || "";
+          }
+          break;
+        } catch {}
+      }
       // 日期回退：优先 front matter date，其次文件名内 YYYY-MM-DD 前缀，最后用名字兜底
       const nameDate = String(f.name || "").match(/(\d{4}[-.]\d{2}[-.]\d{2})/);
       const sortDate = date || (nameDate ? nameDate[1].replace(/\./g, "-") : "");
       return { name: f.name, path: f.path, sha: f.sha, size: f.size, categories, tags, date: sortDate };
-    }));
+    };
+    const posts: any[] = [];
+    const CHUNK = 5;
+    for (let i = 0; i < files.length; i += CHUNK) {
+      posts.push(...(await Promise.all(files.slice(i, i + CHUNK).map(fetchMeta))));
+      if (i + CHUNK < files.length) await new Promise((r) => setTimeout(r, 200));
+    }
 
     // 按日期倒序（最新在前）
     posts.sort((a, b) => (b.date || "").localeCompare(a.date || "") || String(b.name).localeCompare(String(a.name)));
@@ -3266,8 +3275,10 @@ function parseFrontMatter(raw: string): {
             .replace(/\\(['"])/g, "$1");
         }
         else if (k === "date") {
-          const d = v.match(/(\d{4}-\d{2}-\d{2})/);
-          if (d) date = d[1];
+          // 兼容多种写法：2026-07-18 / 2026/7/18 / 2026.07.18 / 2026年7月18日 / 引号包裹 / 带时间时区
+          const t = v.trim().replace(/^['"]|['"]$/g, "");
+          const d = t.match(/(\d{4})[-/.年\s]+(\d{1,2})[-/.月\s]+(\d{1,2})/);
+          if (d) date = `${d[1]}-${d[2].padStart(2, "0")}-${d[3].padStart(2, "0")}`;
         } else if (k === "categories") {
           key = "categories";
           if (v.trim()) categories.push(...cleanList(v));

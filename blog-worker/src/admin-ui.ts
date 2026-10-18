@@ -2569,6 +2569,7 @@ async function loadPosts(){
   if(!r.ok){ list.innerHTML = '<li class="empty">加载失败：'+(r.data&&r.data.error||r.status)+'</li>'; hideBatchBar(); return; }
   const posts = (r.data.posts||[]).slice().sort((a,b)=> (b.date||'').localeCompare(a.date||'') || String(b.name||'').localeCompare(String(a.name||'')));
   selectedPosts.clear();
+  const total=$('#postTotal'); if(total) total.textContent = '共 '+posts.length+' 篇';
   if(!posts.length){ list.innerHTML='<li class="empty">还没有文章，点右上角「＋ 添加新文章」开始写作</li>'; hideBatchBar(); return; }
   wireTaxonomySuggest(r.data);
   list.innerHTML='';
@@ -2577,7 +2578,8 @@ async function loadPosts(){
     const name=(p.name||'').replace(/\\.md$/,'');
     const cat=(p.categories||[]).map(esc).join(' / ');
     const tag=(p.tags||[]).map(esc).join(' · ');
-    const taxo='<div class="meta">'+esc(p.path)+'</div>'+(cat?'<span class="chip">'+cat+'</span>':'')+(tag?'<span class="chip chipTag">'+tag+'</span>':'');
+    const dt=p.date?'<span class="chip">'+esc(p.date)+'</span>':'';
+    const taxo='<div class="meta">'+esc(p.path)+'</div>'+dt+(cat?'<span class="chip">'+cat+'</span>':'')+(tag?'<span class="chip chipTag">'+tag+'</span>':'');
     li.innerHTML = '<div style="display:flex;align-items:center;gap:10px;min-width:0">'+
         '<input type="checkbox" class="postCheck" data-path="'+esc(p.path)+'" style="width:auto;flex-shrink:0">'+
         '<div><div class="name">'+esc(name)+'</div>'+taxo+'</div>'+
@@ -3981,7 +3983,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
   <div id="page-manage" class="${pageCls("manage")}">
     <div class="wk-card">
       <div class="toolbar" style="justify-content:space-between;align-items:center">
-        <h3 class="wk-title" style="margin:0;border:none;padding:0">已有文章</h3>
+        <h3 class="wk-title" style="margin:0;border:none;padding:0">已有文章<span class="wk-label" id="postTotal" style="margin:0 0 0 10px;font-weight:400"></span></h3>
         <div style="display:flex;gap:6px">
           <button class="wk-btn ghost sm" id="batchUpBtn">批量上传</button>
           <button class="wk-btn sm" id="newBtn">＋ 添加新文章</button>
