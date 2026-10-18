@@ -12,6 +12,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # wrangler.toml 里的 database_id 是占位符，真实 id 保存在 Cloudflare 侧；
+      # 与 update-cf.yml 一致：先查询真实 id 并临时回填，否则 API 报 7403
+      - name: Ensure D1 database (自动查询并回填 database_id)
+        working-directory: blog-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          D1_DATABASE_ID_VAR: ${{ vars.D1_DATABASE_ID }}
+        run: |
+          set -e
+          DB_NAME="blog-db"
+          ID="${D1_DATABASE_ID_VAR:-}"
+          if [ -z "$ID" ]; then
+            API="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database"
+            RESP="$(curl -s "$API" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" || true)"
+            ID="$(printf '%s' "$RESP" | jq -r --arg n "$DB_NAME" '.result[]? | select(.name==$n) | .uuid' 2>/dev/null | head -1)"
+          fi
+          if [ -z "$ID" ] || [ "$ID" = "null" ]; then
+            echo "::error::无法获取 D1 库 $DB_NAME 的 id。请设置仓库变量 D1_DATABASE_ID（或让 CF_API_TOKEN 具备 D1:Edit 权限）"
+            exit 1
+          fi
+          sed -i "s/00000000-0000-0000-0000-000000000000/$ID/g" wrangler.toml
+          echo "D1 database_id -> $ID"
+
       - name: 重置管理员账号为 admin/admin
         working-directory: blog-worker
         env:
