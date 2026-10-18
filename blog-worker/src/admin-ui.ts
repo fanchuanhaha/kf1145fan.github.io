@@ -2561,25 +2561,57 @@ async function loadTaxonomySuggest(){
   const r=await api(API_BASE+'/posts');
   if(r.ok&&r.data) wireTaxonomySuggest(r.data);
 }
-async function loadPosts(){
-  const list = $('#postList'); if(!list) return;
-  list.innerHTML = '<li class="empty">加载中...</li>';
-  const r = await api(API_BASE+'/posts');
-  if(r.status===401){ redirectLogin(); return; }
-  if(!r.ok){ list.innerHTML = '<li class="empty">加载失败：'+(r.data&&r.data.error||r.status)+'</li>'; hideBatchBar(); return; }
-  const posts = (r.data.posts||[]).slice().sort((a,b)=> (b.date||'').localeCompare(a.date||'') || String(b.name||'').localeCompare(String(a.name||'')));
+let rawPosts=[];
+function fillPostFilterOptions(){
+  const cats=[...new Set(rawPosts.flatMap(p=>p.categories||[]))].sort();
+  const tags=[...new Set(rawPosts.flatMap(p=>p.tags||[]))].sort();
+  const fc=$('#postFCat'), ft=$('#postFTag');
+  if(fc){
+    const keep=fc.value;
+    fc.innerHTML='<option value="">全部</option>'+cats.map(c=>'<option>'+esc(c)+'</option>').join('');
+    if([...fc.options].some(o=>o.value===keep)) fc.value=keep;
+  }
+  if(ft){
+    const keep=ft.value;
+    ft.innerHTML='<option value="">全部</option>'+tags.map(t=>'<option>'+esc(t)+'</option>').join('');
+    if([...ft.options].some(o=>o.value===keep)) ft.value=keep;
+  }
+}
+function applyPostView(){
+  const list=$('#postList'); if(!list) return;
+  const sortV=($('#postSort')||{}).value||'date-desc';
+  const cat=($('#postFCat')||{}).value||'';
+  const tag=($('#postFTag')||{}).value||'';
+  const fmt=($('#postFFmt')||{}).value||'';
+  const q=(($('#postFQ')||{}).value||'').trim().toLowerCase();
+  let ps=rawPosts.slice();
+  if(cat) ps=ps.filter(p=>(p.categories||[]).some(c=>c===cat));
+  if(tag) ps=ps.filter(p=>(p.tags||[]).some(t=>t===tag));
+  if(fmt==='dated') ps=ps.filter(p=>/^\d{4}-\d{2}-\d{2}-/.test(p.name||''));
+  else if(fmt==='plain') ps=ps.filter(p=>!/^\d{4}-\d{2}-\d{2}-/.test(p.name||''));
+  if(q) ps=ps.filter(p=>(String(p.name||'').toLowerCase().includes(q)));
+  // 升序比较器（无日期排最后），desc 取反；同序时按文件名稳定排序
+  const dateAsc=(a,b)=>((a.date||'')==='')-((b.date||'')==='')||String(a.date||'').localeCompare(String(b.date||''));
+  const nameCmp=(a,b)=>String(a.name||'').localeCompare(String(b.name||''));
+  ps.sort((a,b)=>{
+    if(sortV==='date-asc') return dateAsc(a,b)||nameCmp(a,b);
+    if(sortV==='date-desc') return -dateAsc(a,b)||nameCmp(a,b);
+    if(sortV==='size-asc') return (a.size||0)-(b.size||0)||nameCmp(a,b);
+    return (b.size||0)-(a.size||0)||nameCmp(a,b); // size-desc
+  });
+  const total=$('#postTotal'); if(total) total.textContent = ps.length===rawPosts.length ? ('共 '+rawPosts.length+' 篇') : ('显示 '+ps.length+' / '+rawPosts.length+' 篇');
   selectedPosts.clear();
-  const total=$('#postTotal'); if(total) total.textContent = '共 '+posts.length+' 篇';
-  if(!posts.length){ list.innerHTML='<li class="empty">还没有文章，点右上角「＋ 添加新文章」开始写作</li>'; hideBatchBar(); return; }
-  wireTaxonomySuggest(r.data);
+  if(!rawPosts.length){ list.innerHTML='<li class="empty">还没有文章，点右上角「＋ 添加新文章」开始写作</li>'; hideBatchBar(); return; }
+  if(!ps.length){ list.innerHTML='<li class="empty">没有符合条件的文章，调整上方过滤条件</li>'; hideBatchBar(); return; }
   list.innerHTML='';
-  posts.forEach(p=>{
+  ps.forEach(p=>{
     const li=document.createElement('li');
     const name=(p.name||'').replace(/\\.md$/,'');
     const cat=(p.categories||[]).map(esc).join(' / ');
     const tag=(p.tags||[]).map(esc).join(' · ');
     const dt=p.date?'<span class="chip">'+esc(p.date)+'</span>':'';
-    const taxo='<div class="meta">'+esc(p.path)+'</div>'+dt+(cat?'<span class="chip">'+cat+'</span>':'')+(tag?'<span class="chip chipTag">'+tag+'</span>':'');
+    const sz=p.size?'<span class="chip">'+(p.size/1024).toFixed(1)+' KB</span>':'';
+    const taxo='<div class="meta">'+esc(p.path)+'</div>'+dt+sz+(cat?'<span class="chip">'+cat+'</span>':'')+(tag?'<span class="chip chipTag">'+tag+'</span>':'');
     li.innerHTML = '<div style="display:flex;align-items:center;gap:10px;min-width:0">'+
         '<input type="checkbox" class="postCheck" data-path="'+esc(p.path)+'" style="width:auto;flex-shrink:0">'+
         '<div><div class="name">'+esc(name)+'</div>'+taxo+'</div>'+
@@ -2591,6 +2623,17 @@ async function loadPosts(){
     list.appendChild(li);
   });
   showBatchBar();
+}
+async function loadPosts(){
+  const list = $('#postList'); if(!list) return;
+  list.innerHTML = '<li class="empty">加载中...</li>';
+  const r = await api(API_BASE+'/posts');
+  if(r.status===401){ redirectLogin(); return; }
+  if(!r.ok){ list.innerHTML = '<li class="empty">加载失败：'+(r.data&&r.data.error||r.status)+'</li>'; hideBatchBar(); return; }
+  rawPosts = r.data.posts||[];
+  wireTaxonomySuggest(r.data);
+  fillPostFilterOptions();
+  applyPostView();
 }
 // ---------- 管理文章：多选 / 批量操作 ----------
 let selectedPosts = new Set();
@@ -3988,6 +4031,26 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
           <button class="wk-btn ghost sm" id="batchUpBtn">批量上传</button>
           <button class="wk-btn sm" id="newBtn">＋ 添加新文章</button>
         </div>
+      </div>
+      <div class="filters" id="postFilterBar" style="margin:10px 0 0;flex-wrap:wrap;gap:8px">
+        <span class="wk-label" style="margin:0">排序</span>
+        <select class="wk-input" id="postSort" onchange="applyPostView()" style="width:auto;padding:4px 8px">
+          <option value="date-desc">日期 倒序（新→旧）</option>
+          <option value="date-asc">日期 正序（旧→新）</option>
+          <option value="size-asc">大小 正序（小→大）</option>
+          <option value="size-desc">大小 倒序（大→小）</option>
+        </select>
+        <span class="wk-label" style="margin:0 0 0 6px">分类</span>
+        <select class="wk-input" id="postFCat" onchange="applyPostView()" style="width:auto;padding:4px 8px"><option value="">全部</option></select>
+        <span class="wk-label" style="margin:0 0 0 6px">标签</span>
+        <select class="wk-input" id="postFTag" onchange="applyPostView()" style="width:auto;padding:4px 8px"><option value="">全部</option></select>
+        <span class="wk-label" style="margin:0 0 0 6px">格式</span>
+        <select class="wk-input" id="postFFmt" onchange="applyPostView()" style="width:auto;padding:4px 8px">
+          <option value="">全部</option>
+          <option value="dated">日期前缀文件名</option>
+          <option value="plain">无日期前缀</option>
+        </select>
+        <input class="wk-input" id="postFQ" placeholder="搜索标题 / 文件名" oninput="applyPostView()" style="width:160px;padding:4px 8px">
       </div>
       <div class="filters hidden" id="batchBar" style="margin:10px 0 0">
         <label class="wk-label" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">
