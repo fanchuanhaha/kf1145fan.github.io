@@ -3129,16 +3129,21 @@ function normalizePaths(input: unknown): string[] {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// 删除文章时同步清理对应评论（按文件 slug 匹配页面 URL，如 /2026/07/18/slug/）
+// 删除文章时同步清理对应评论（按文件 slug 匹配页面 URL，如 /2026/07/18/xxx/）
+// Hexo :title 默认为完整文件名（可能含日期前缀），两种都匹配以免漏删
 async function deleteCommentsForPost(env: Bindings, path: string): Promise<number> {
   const name = path.split("/").pop() || "";
   if (!/\.(md|markdown|txt)$/i.test(name)) return 0;
-  let slug = name.replace(/\.(md|markdown|txt)$/i, "").replace(/^\d{4}-\d{2}-\d{2}-?/, "");
-  if (!slug) return 0;
+  const full = name.replace(/\.(md|markdown|txt)$/i, "");
+  const slim = full.replace(/^\d{4}-\d{2}-\d{2}-?/, "");
+  const slugs = [...new Set([full, slim].filter(Boolean))];
+  if (!slugs.length) return 0;
   try {
+    const conds = slugs.map((_, i) => `url LIKE ?${i * 3 + 1} OR url LIKE ?${i * 3 + 2} OR url = ?${i * 3 + 3}`).join(" OR ");
+    const binds = slugs.flatMap((s) => [`%/${s}/%`, `%/${s}`, `/${s}`]);
     const r = await (env as { DB: D1Database }).DB
-      .prepare(`DELETE FROM wl_Comments WHERE url LIKE ?1 OR url LIKE ?2 OR url = ?3`)
-      .bind(`%/${slug}/%`, `%/${slug}`, `/${slug}`)
+      .prepare(`DELETE FROM wl_Comments WHERE ${conds}`)
+      .bind(...binds)
       .run();
     return r.meta?.changes ?? 0;
   } catch {
