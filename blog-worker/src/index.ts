@@ -319,7 +319,7 @@ app.post("/api/admin/init", async (c) => {
       env.JWT_SECRET,
     );
     c.header("Set-Cookie", ADMIN_COOKIE(token));
-    return json({ ok: true, username });
+    return c.json({ ok: true, username });
   } catch (e) {
     console.error("admin init failed", e);
     return json({ ok: false, error: "创建失败（用户名可能已被占用），请重试" }, 500);
@@ -350,7 +350,7 @@ app.post("/api/admin/login", async (c) => {
       env.JWT_SECRET,
     );
     c.header("Set-Cookie", ADMIN_COOKIE(token));
-    return json({ ok: true, username });
+    return c.json({ ok: true, username });
   } catch (e) {
     console.error("admin login failed", e);
     return json({ ok: false, error: "登录失败，请重试" }, 500);
@@ -375,7 +375,7 @@ app.get("/api/admin/me", async (c) => {
 // 退出登录（清 Cookie）
 app.post("/api/admin/logout", (c) => {
   c.header("Set-Cookie", "bl_token=;path=/;max-age=0;SameSite=Lax");
-  return json({ ok: true });
+  return c.json({ ok: true });
 });
 
 // 修改管理员密码（需先登录）
