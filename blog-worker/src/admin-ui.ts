@@ -289,8 +289,10 @@ a{color:var(--accent);text-decoration:none}
 .ai-continue span{flex:1 1 auto}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .ai-continue{color:#fbbf24;background:rgba(251,191,36,.12)}}
 :root[data-theme="dark"] .ai-continue{color:#fbbf24;background:rgba(251,191,36,.12)}
-/* 输入框不显示拖拽手柄：随内容自动向上增高（到上限后内部滚动） */
-.ai-input textarea{flex:1;resize:none;min-height:34px;max-height:220px;overflow-y:hidden;border-radius:2px}
+/* 输入框：随内容自动增高；右下角手柄可手动拖拽调整高度（拖拽后固定，内容更多时到 600 上限内部滚动） */
+.ai-input textarea{flex:1;resize:vertical;min-height:34px;max-height:600px;overflow-y:hidden;border-radius:2px}
+/* 中断的过程块摘要：与「已完成」区分 */
+.ai-proc summary .ai-int{color:var(--danger)}
 /* 生成中：发送键原地变成灰色「停止」 */
 #aiSendBtn{flex:0 0 auto}
 #aiSendBtn.stop{background:var(--muted);color:#fff}
@@ -1625,8 +1627,9 @@ function aiTurnHtml(turn, startIdx, live){
       let ms = 0;
       turn.forEach(function(m){ if(m && m.perf && +m.perf.ms > 0) ms += +m.perf.ms; });
       const hasReasoning = turn.some(function(m){ return !!(m && m.reasoning); });
+      const interrupted = turn.some(function(m){ return !!(m && m.interrupted); });
       procHtml = '<details class="ai-proc" data-k="' + procKey + '"' + fold + '>' +
-        '<summary>' + (hasReasoning ? '已深度思考' : '已完成') +
+        '<summary>' + (interrupted ? '<span class="ai-int">已中断</span>' : (hasReasoning ? '已深度思考' : '已完成')) +
         (lastTool ? ' · 最后调用 ' + esc(lastTool) : '') +
         (toolCount ? ' · 共 ' + toolCount + ' 次工具调用' : '') +
         (ms > 0 ? ' · 用时 ' + (ms / 1000).toFixed(1) + 's' : '') +
@@ -1789,13 +1792,15 @@ function aiSetSendState(busy){
   if(busy) b.classList.add('stop'); else b.classList.remove('stop');
 }
 
-// 输入框自动增高（底部对齐，视觉上向上拉升）；超过上限后内部滚动
+// 输入框自动增高（底部对齐，视觉上向上拉升）；用户手动拖拽过则尊重拖拽高度（上限 600）
+let aiInputH = 0; // 手动拖拽设定的高度；0 = 未拖过，自动增高（上限 220）
 function aiAutoGrow(){
   const el = $('#aiInput'); if(!el) return;
   el.style.height = 'auto';
-  const max = 220;
-  el.style.height = Math.min(el.scrollHeight, max) + 'px';
-  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+  const max = aiInputH > 0 ? 600 : 220;
+  const h = aiInputH > 0 ? Math.max(el.scrollHeight, aiInputH) : el.scrollHeight;
+  el.style.height = Math.min(h, max) + 'px';
+  el.style.overflowY = el.scrollHeight > Math.min(h, max) + 2 ? 'auto' : 'hidden';
 }
 async function aiSend(){
   if(aiStreaming){ aiStop(); return; } // 生成中：该按钮就是「停止」
@@ -1856,6 +1861,7 @@ async function aiAgentLoop(){
           if(msg){ msg.className = 'msg'; msg.textContent = '已停止生成'; }
           // 停止时保留已生成的部分内容（草稿已落盘，这里转正），重渲染后仍可见
           if(ui.acc){ if(!aiFinalizeDraft(ui.acc)) aiConvMessages.push({ role:'assistant', content: ui.acc }); }
+          aiMarkInterrupted(turnStart); // 过程块摘要显示「已中断」而非「已完成」
           finished = true;
           break;
         }
@@ -1865,6 +1871,7 @@ async function aiAgentLoop(){
         toast('请求失败：' + err, true);
         // 保留已收到的部分内容（草稿转正），并清掉临时气泡
         if(ui.acc){ if(!aiFinalizeDraft(ui.acc)) aiConvMessages.push({ role:'assistant', content: ui.acc }); }
+        aiMarkInterrupted(turnStart);
         finished = true;
         break;
       }
@@ -1946,11 +1953,18 @@ async function aiAgentLoop(){
   await aiSaveConversation();
   scrollAiBottom();
 }
+// 标记本回合被中断（手动停止/请求失败）：给回合内最后一条 assistant 消息打标，渲染成「已中断」
+function aiMarkInterrupted(turnStart){
+  for(let k = aiConvMessages.length - 1; k >= turnStart; k--){
+    const m = aiConvMessages[k];
+    if(m && m.role === 'assistant'){ m.interrupted = true; return; }
+  }
+}
 // 清理历史消息：去掉仅供前端展示的字段（思考/拒绝/用量/草稿标记），避免上游接口报错
 function aiCleanMsg(m){
-  if(!m || (m.reasoning === undefined && m.denied === undefined && m.usage === undefined && m.perf === undefined && m.draft === undefined)) return m;
+  if(!m || (m.reasoning === undefined && m.denied === undefined && m.usage === undefined && m.perf === undefined && m.draft === undefined && m.interrupted === undefined)) return m;
   const c = {};
-  for(const k in m){ if(k !== 'reasoning' && k !== 'denied' && k !== 'usage' && k !== 'perf' && k !== 'draft') c[k] = m[k]; }
+  for(const k in m){ if(k !== 'reasoning' && k !== 'denied' && k !== 'usage' && k !== 'perf' && k !== 'draft' && k !== 'interrupted') c[k] = m[k]; }
   return c;
 }
 // 流式过程中的渲染：已完成段落走 Markdown，末尾未完成的段落用纯文本显示。
@@ -2073,8 +2087,8 @@ async function aiStreamRound(modelName, ui, noTools){
       if(delta.tool_calls && delta.tool_calls.length){
         markFirst();
         aiLivePhase = '准备调用工具…';
-        // 有工具调用：重新展开过程块，实时看到这次调用了什么
-        aiSetProcOpen(ui && ui.procKey, true);
+        // 有工具调用：重新展开过程块实时查看；但用户手动收起过就不再强行展开（避免「展开又收回」的跳动）
+        if(aiFoldOpen[ui && ui.procKey] !== false) aiSetProcOpen(ui && ui.procKey, true);
         for(let ti=0; ti<delta.tool_calls.length; ti++){
           const tc = delta.tool_calls[ti];
           const key = (tc.index === undefined || tc.index === null) ? 0 : tc.index;
@@ -3783,10 +3797,19 @@ document.addEventListener('DOMContentLoaded', ()=>{
   const aiInputEl = $('#aiInput');
   if(aiInputEl){
     aiInputEl.addEventListener('keydown', e=>{
-      if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); aiSend(); }
+      if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); if(aiStreaming){ toast('正在生成中，可点「停止」中断'); return; } aiSend(); }
     });
     // 输入框随内容自动增高（上限后内部滚动），因为是底部对齐，视觉上向上拉升
     aiInputEl.addEventListener('input', aiAutoGrow);
+    // 用户拖拽右下角手柄调整高度后记住该高度（之后自动增高以此为下限，不再缩回）
+    aiInputEl.addEventListener('resize', function(){
+      aiInputH = Math.round(aiInputEl.getBoundingClientRect().height);
+      aiAutoGrow();
+    });
+    // 兜底：偶发点击不聚焦（流式渲染期间布局位移导致点击落空），点击时强制聚焦
+    aiInputEl.addEventListener('click', function(){
+      if(document.activeElement !== aiInputEl){ try{ aiInputEl.focus(); }catch(e){} }
+    });
     aiAutoGrow();
   }
   // 手机端：尺寸变化 / 旋转 / 软键盘弹出时重新计算聊天区高度，保证输入框始终贴屏幕底边
