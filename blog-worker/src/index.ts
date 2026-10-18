@@ -3254,6 +3254,8 @@ function parseFrontMatter(raw: string): {
   const categories: string[] = [];
   const tags: string[] = [];
   let date = "";
+  // 剥掉 UTF-8 BOM（Windows 记事本保存的文件开头会带），否则 /^---/ 匹配失败、整个 front-matter 解析不出
+  raw = raw.replace(/^\uFEFF/, "");
   let body = raw;
   const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (m) {
