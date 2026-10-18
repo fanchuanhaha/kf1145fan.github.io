@@ -152,6 +152,10 @@ a{color:var(--accent);text-decoration:none}
 :root[data-theme="dark"] .msg.ok{color:#4ade80}
 /* 部署历史 */
 /* 分类/标签历史建议（浏览器原生 datalist，可输入或选择） */
+/* 标签联想下拉（多标签：英文逗号分隔，逗号后继续联想） */
+.tag-sug{position:absolute;top:100%;left:0;right:0;z-index:30;background:var(--card);border:1px solid var(--border);border-top:none;max-height:180px;overflow:auto;box-shadow:0 4px 12px rgba(0,0,0,.12)}
+.tag-sug-item{padding:5px 10px;font-size:12px;cursor:pointer}
+.tag-sug-item:hover,.tag-sug-item.active{background:var(--hover);color:var(--accent)}
 /* 访问量统计卡片 */
 .stats-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:12px}
 .stats{display:flex;gap:12px;min-width:max-content}
@@ -2456,12 +2460,56 @@ async function broadcastSubscribe(){
 
 // ---------- 管理文章 ----------
 // 用历史分类/标签填充输入框浏览器原生 datalist（可输入或从历史下拉选择）
+let allTagOptions=[];
 function wireTaxonomySuggest(d){
   const ac=d&&d.allCategories||[], at=d&&d.allTags||[];
+  allTagOptions=(at||[]).slice();
   const cl=$('#catList'), tl=$('#tagList');
   if(cl){ cl.innerHTML=''; ac.forEach(x=>{ const o=document.createElement('option'); o.value=x; cl.appendChild(o); }); }
   if(tl){ tl.innerHTML=''; at.forEach(x=>{ const o=document.createElement('option'); o.value=x; tl.appendChild(o); }); }
 }
+// ---------- 标签联想（多标签：英文逗号分隔，逗号后继续联想）----------
+// 原生 datalist 在输入框含逗号后就不再弹建议，这里改为自定义下拉：
+// 只对「最后一个逗号之后」的片段联想，并自动排除已输入过的标签
+let tagSugItems=[], tagSugIdx=-1;
+function tagSugParts(v){ return String(v==null?'':v).split(/[,，]/); }
+function updateTagSug(){
+  const box=$('#tagSug'), inp=$('#tags');
+  if(!box||!inp) return;
+  const parts=tagSugParts(inp.value);
+  const q=(parts[parts.length-1]||'').trim().toLowerCase();
+  if(!q){ hideTagSug(); return; }
+  const entered=parts.map(s=>s.trim().toLowerCase()).filter(Boolean);
+  entered.pop();
+  tagSugItems=allTagOptions.filter(t=>t&&String(t).toLowerCase().indexOf(q)>=0&&!entered.includes(String(t).toLowerCase())).slice(0,8);
+  if(!tagSugItems.length){ hideTagSug(); return; }
+  tagSugIdx=-1;
+  box.innerHTML=tagSugItems.map((t,i)=>'<div class="tag-sug-item" data-i="'+i+'" onmousedown="pickTagSug(event,'+i+')">'+esc(t)+'</div>').join('');
+  box.style.display='block';
+}
+function pickTagSug(e,i){
+  if(e) e.preventDefault();
+  const t=tagSugItems[i], inp=$('#tags');
+  if(t==null||!inp) return;
+  const parts=tagSugParts(inp.value);
+  parts[parts.length-1]=t;
+  inp.value=parts.join(', ').replace(/\\s+$/,'')+', ';
+  hideTagSug();
+  inp.focus();
+}
+function tagSugKey(e){
+  const box=$('#tagSug');
+  const open=!!box&&box.style.display==='block';
+  if(!open){ if(e.key==='ArrowDown'||e.key==='ArrowUp') updateTagSug(); return; }
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault();
+    tagSugIdx=(tagSugIdx+(e.key==='ArrowDown'?1:tagSugItems.length-1))%tagSugItems.length;
+    box.querySelectorAll('.tag-sug-item').forEach((el,i)=>el.classList.toggle('active',i===tagSugIdx));
+  } else if(e.key==='Enter'){
+    if(tagSugIdx>=0){ e.preventDefault(); pickTagSug(null,tagSugIdx); } else hideTagSug();
+  } else if(e.key==='Escape'){ hideTagSug(); }
+}
+function hideTagSug(){ const box=$('#tagSug'); if(box) box.style.display='none'; }
 // 独立拉取历史分类/标签，填充写作页下拉建议（管理页由 loadPosts 调用；写作页单独调用）
 async function loadTaxonomySuggest(){
   const r=await api(API_BASE+'/posts');
@@ -2602,7 +2650,7 @@ async function openEdit(path){
   const p=r.data.post||{};
   $('#title').value=p.title||'';
   $('#date').value=(p.date||new Date().toISOString().slice(0,10)).slice(0,10);
-  $('#tags').value=(p.tags||[]).join('，');
+  $('#tags').value=(p.tags||[]).join(', ');
   $('#categories').value=(p.categories||[]).join('，');
   $('#editorTitle').textContent='编辑：'+(p.title||nameOf(p.path));
   $('#saveBtn').textContent='保存修改';
@@ -3932,7 +3980,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
       <div class="wk-row">
         <div class="wk-field"><label class="wk-label">日期</label><input class="wk-input" type="date" id="date"></div>
         <div class="wk-field"><label class="wk-label">分类</label><input class="wk-input" id="categories" list="catList" placeholder="可输入或从历史下拉选择，多个用逗号分开"></div>
-        <div class="wk-field"><label class="wk-label">标签</label><input class="wk-input" id="tags" list="tagList" placeholder="可输入或从历史下拉选择，多个用逗号分开"></div>
+        <div class="wk-field"><label class="wk-label">标签</label><div style="position:relative"><input class="wk-input" id="tags" autocomplete="off" placeholder="多个用英文逗号隔开，可联想历史标签" oninput="updateTagSug()" onkeydown="tagSugKey(event)" onblur="setTimeout(hideTagSug,150)"><div id="tagSug" class="tag-sug" style="display:none"></div></div></div>
       </div>
       <datalist id="catList"></datalist>
       <datalist id="tagList"></datalist>
@@ -4073,49 +4121,8 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 订阅管理（SMTP + 订阅者 + 群发 + 邮件模板，全部集中在本页） -->
+  <!-- 订阅管理（订阅者 + 订阅限制 + 群发 + 邮件模板；SMTP 服务器在「设置」页） -->
   <div id="page-subscribe" class="${pageCls("subscribe")}">
-    <div class="wk-card">
-      <h3 class="wk-title">SMTP 邮件服务器</h3>
-      <p class="wk-label" style="margin-top:0">用于发送订阅确认与群发邮件。<b>Workers 仅支持 465 端口（隐式 TLS）</b>；QQ/163 等邮箱请填写「授权码」而非登录密码。</p>
-      <div class="wk-row">
-        <div style="flex:2">
-          <label class="wk-label">SMTP 服务器</label>
-          <input class="wk-input" id="smHost" placeholder="smtp.qq.com">
-        </div>
-        <div style="flex:1">
-          <label class="wk-label">端口</label>
-          <input class="wk-input" id="smPort" type="number" value="465" placeholder="465">
-        </div>
-      </div>
-      <div class="wk-row">
-        <div style="flex:1">
-          <label class="wk-label">用户名</label>
-          <input class="wk-input" id="smUser" placeholder="you@qq.com">
-        </div>
-        <div style="flex:1">
-          <label class="wk-label">密码 / 授权码</label>
-          <input class="wk-input" id="smPass" type="password" placeholder="留空表示不修改">
-        </div>
-      </div>
-      <div class="wk-row">
-        <div style="flex:1">
-          <label class="wk-label">发件人名称</label>
-          <input class="wk-input" id="smFromName" placeholder="我的博客">
-        </div>
-        <div style="flex:1">
-          <label class="wk-label">发件人邮箱（默认同用户名）</label>
-          <input class="wk-input" id="smFromEmail" placeholder="you@qq.com">
-        </div>
-      </div>
-      <div class="filters" style="margin:14px 0 0">
-        <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存 SMTP 配置</button>
-        <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
-        <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
-      </div>
-      <div class="msg" id="smtpMsg"></div>
-    </div>
-
     <div class="wk-card">
       <h3 class="wk-title">订阅者</h3>
       <div class="stats-scroll"><div class="stats">
@@ -4263,7 +4270,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
   </div>
 
-  <!-- 设置（后台设置[外观+工作流+站点功能]、AI 设置、密钥管理、API 说明；订阅相关配置都在「订阅管理」页） -->
+  <!-- 设置（后台设置[外观+工作流+站点功能]、SMTP 邮件服务器、AI 设置、密钥管理、API 说明；订阅数据与邮件模板在「订阅管理」页） -->
   <div id="page-settings" class="${pageCls("settings")}">
     <details class="wk-collapse">
       <summary>后台设置</summary>
@@ -4313,6 +4320,49 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         </div>
         <div class="msg" id="adminMsg"></div>
         <div class="msg" id="siteMsg"></div>
+      </div>
+    </details>
+
+    <details class="wk-collapse">
+      <summary>SMTP 邮件服务器</summary>
+      <div class="wk-collapse-body">
+        <p class="wk-label" style="margin-top:0">用于发送订阅确认与群发邮件。<b>Workers 仅支持 465 端口（隐式 TLS）</b>；QQ/163 等邮箱请填写「授权码」而非登录密码。</p>
+        <div class="wk-row">
+          <div style="flex:2">
+            <label class="wk-label">SMTP 服务器</label>
+            <input class="wk-input" id="smHost" placeholder="smtp.qq.com">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">端口</label>
+            <input class="wk-input" id="smPort" type="number" value="465" placeholder="465">
+          </div>
+        </div>
+        <div class="wk-row">
+          <div style="flex:1">
+            <label class="wk-label">用户名</label>
+            <input class="wk-input" id="smUser" placeholder="you@qq.com">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">密码 / 授权码</label>
+            <input class="wk-input" id="smPass" type="password" placeholder="留空表示不修改">
+          </div>
+        </div>
+        <div class="wk-row">
+          <div style="flex:1">
+            <label class="wk-label">发件人名称</label>
+            <input class="wk-input" id="smFromName" placeholder="我的博客">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">发件人邮箱（默认同用户名）</label>
+            <input class="wk-input" id="smFromEmail" placeholder="you@qq.com">
+          </div>
+        </div>
+        <div class="filters" style="margin:14px 0 0">
+          <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存 SMTP 配置</button>
+          <input class="wk-input" id="smTestTo" style="width:220px" placeholder="测试收件邮箱">
+          <button class="wk-btn ghost sm" onclick="sendSubscribeTest()">发送测试邮件</button>
+        </div>
+        <div class="msg" id="smtpMsg"></div>
       </div>
     </details>
 
