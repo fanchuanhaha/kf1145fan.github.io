@@ -22,7 +22,6 @@ body{margin:0;font:13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'
 background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;padding:16px}
 .card{width:100%;max-width:340px;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:28px}
 .brand{display:flex;align-items:center;gap:8px;margin-bottom:4px}
-.brand img{width:22px;height:22px}
 h1{font-size:16px;margin:0;font-weight:600}
 .sub{color:var(--muted);font-size:12px;margin:4px 0 20px}
 label{font-size:12px;color:var(--muted);display:block;margin:12px 0 4px}
@@ -133,7 +132,6 @@ export function renderAdminLoginPage(siteUrl: string): string {
 <body>
 <div class="card">
   <div class="brand">
-    <img src="https://waline.js.org/logo.png" alt="">
     <h1>博客管理后台</h1>
   </div>
   <div class="sub" id="sub">使用管理员账号登录</div>
