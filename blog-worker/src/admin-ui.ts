@@ -2569,7 +2569,7 @@ async function deleteSelectedPosts(){
   const r=await api(API_BASE+'/posts/delete',{method:'POST',body:JSON.stringify({paths:paths})});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
-    postOpDone('已删除 '+(r.data.moved||0)+'/'+(r.data.total||paths.length)+' 篇（已推送到 GitHub）', r.data);
+    postOpDone('已删除 '+(r.data.moved||0)+'/'+(r.data.total||paths.length)+' 篇（已移入回收站）', r.data, 'neutral');
     await loadPosts();
   } else opBannerEnd('批量删除失败：'+(r.data&&r.data.error||r.status),false);
 }
@@ -2697,7 +2697,7 @@ async function delPost(path,name){
   const r=await api(API_BASE+'/post?path='+encodeURIComponent(path),{method:'DELETE'});
   if(r.status===401){ redirectLogin(); return; }
   if(r.ok&&r.data&&r.data.ok){
-    postOpDone('已删除文章「'+name+'」（已推送到 GitHub）', r.data);
+    postOpDone('已删除文章「'+name+'」（已移入回收站）', r.data, 'neutral');
     loadPosts();
   }
   else opBannerEnd('删除失败：'+(r.data&&r.data.error||r.status),false);
@@ -2910,18 +2910,20 @@ async function runUpdateWorkflow(){
   } else toast('触发失败：'+(r.data&&r.data.error||r.status),true);
 }
 // 发文/删文/批量上传完成后的统一提示：手动模式常驻提示「需运行工作流」，自动模式跟进构建进度
-function postOpDone(msg, data){
+// ok：true=绿色成功、false=红色失败、'neutral'=中性（删除类操作不用绿色）
+function postOpDone(msg, data, ok){
+  if(ok===undefined) ok=true;
   if(data && data.workflow_mode==='manual' && data.need_workflow){
     showNeedWorkflowReminder(msg+'（手动模式：需运行工作流才会更新站点）');
     return;
   }
   needWorkflowReminder=false; needWorkflowMsg='';
   if(data && data.build_triggered){
-    opBannerEnd(msg+'，正在自动构建站点…', true);
+    opBannerEnd(msg+'，正在自动构建站点…', ok);
     setTimeout(function(){ initBuildStatus(); }, 8000);
     return;
   }
-  opBannerEnd(msg, true);
+  opBannerEnd(msg, ok);
 }
 // ---------- 通用操作日志横幅 ----------
 // 与工作流横幅同一位置：文件删除/上传/克隆等耗时操作显示「正在…」与结果
@@ -2937,10 +2939,10 @@ function opBanner(msg, kind){
   b.innerHTML=(kind==='busy'?'<span class="build-run-item"><span class="build-dot"></span>':'')+'<span>'+esc(msg)+'</span>';
   b.classList.remove('hidden');
 }
-// 结束一条操作日志：ok 决定颜色；4 秒后自动隐藏并恢复工作流横幅
+// 结束一条操作日志：ok 决定颜色（true=绿 / false=红 / 'neutral'=中性）；4 秒后自动隐藏并恢复工作流横幅
 function opBannerEnd(msg, ok){
   if(opBannerWatchdog){ clearTimeout(opBannerWatchdog); opBannerWatchdog=null; }
-  opBanner(msg, ok?'ok':'err');
+  opBanner(msg, ok==='neutral'?'':(ok?'ok':'err'));
   opBannerBusy=false;
   if(opBannerTimer) clearTimeout(opBannerTimer);
   opBannerTimer=setTimeout(function(){
@@ -3316,7 +3318,7 @@ async function fileBatchOp(kind){
   opBanner('正在'+label+' '+paths.length+' 项…','busy');
   const r=await api(API_BASE+'/files/'+kind,{method:'POST',body:JSON.stringify({paths:paths,branch:curBranch()})});
   if(r.status===401){ redirectLogin(); return; }
-  if(r.ok&&r.data&&r.data[key]>0) opBannerEnd('已'+label+' '+r.data[key]+'/'+(r.data.total||paths.length)+' 项',true);
+  if(r.ok&&r.data&&r.data[key]>0) opBannerEnd('已'+label+' '+r.data[key]+'/'+(r.data.total||paths.length)+' 项','neutral');
   else opBannerEnd(label+'失败：'+(r.data&&r.data.error||r.status),false);
   selectedFiles.clear();
   loadFiles();
@@ -3348,7 +3350,7 @@ async function onFileClick(e){
     const r=await api(API_BASE+'/files/recycle',{method:'POST',body:JSON.stringify({paths:[path],branch:curBranch()})});
     if(r.status===401){ redirectLogin(); return; }
     const err=(r.data&&r.data.error)||(r.data&&r.data.results&&r.data.results[0]&&r.data.results[0].error);
-    if(r.ok&&r.data&&r.data.ok) opBannerEnd('已删除「'+name+'」（已移入回收站）',true);
+    if(r.ok&&r.data&&r.data.ok) opBannerEnd('已删除「'+name+'」（已移入回收站）','neutral');
     else opBannerEnd('删除失败：'+(err||r.status),false);
     loadFiles();
     return;
