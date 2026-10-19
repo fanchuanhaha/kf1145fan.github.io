@@ -2094,6 +2094,42 @@ async function broadcastToConfirmed(
   return { sent, failed, total: list.length };
 }
 
+// 退订确认页：点击邮件里的退订链接先弹出确认，点「确认退订」才真正执行（POST），
+// 避免误点或邮件安全软件预取链接导致误退订
+function subscribeConfirmPage(
+  title: string,
+  message: string,
+  siteUrl?: string,
+  actionUrl?: string
+): string {
+  const back = siteUrl
+    ? '<p style="margin-top:16px"><a href="' + siteUrl + '" style="color:#6b7280">暂不退订，返回站点</a></p>'
+    : "";
+  const form = actionUrl
+    ? '<form method="post" action="' + actionUrl + '" style="margin-top:18px">' +
+      '<button type="submit" style="padding:8px 24px;border:0;border-radius:4px;background:#dc2626;color:#fff;' +
+      'font-size:14px;cursor:pointer">确认退订</button></form>'
+    : "";
+  return (
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
+    title +
+    "</title></head>" +
+    '<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+    "font:14px/1.7 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',Arial,sans-serif;" +
+    'background:#f7f7f8;color:#1f2328">' +
+    '<div style="max-width:420px;width:calc(100% - 32px);padding:28px;background:#fff;border:1px solid #e3e3e4;border-radius:6px;text-align:center">' +
+    '<h1 style="margin:0 0 10px;font-size:18px">' +
+    title +
+    '</h1><p style="color:#6b7280;margin:0">' +
+    message +
+    "</p>" +
+    form +
+    back +
+    "</div></body></html>"
+  );
+}
+
 function subscribeResultPage(
   title: string,
   message: string,
@@ -2245,9 +2281,29 @@ app.get("/api/subscribe/confirm", async (c) => {
   }
 });
 
-// 退订：GET /api/subscribe/unsubscribe?token=xxx
+// 退订：GET /api/subscribe/unsubscribe?token=xxx → 确认页（点「确认退订」后 POST 才执行）
 app.get("/api/subscribe/unsubscribe", async (c) => {
   const token = c.req.query("token") || "";
+  const cfg = await getSubscribeConfig((c.env as Bindings).DB).catch(
+    () => SUBSCRIBE_DEFAULT_CONFIG
+  );
+  if (!token) {
+    return c.html(subscribeResultPage("链接无效", "缺少退订参数。", cfg.siteUrl), 400);
+  }
+  return c.html(
+    subscribeConfirmPage(
+      "确认退订",
+      "你正在退订 <b>" + (cfg.siteName || "本站") + "</b> 的邮件通知，确认后将不再收到新文章邮件。",
+      cfg.siteUrl,
+      "/api/subscribe/unsubscribe?token=" + encodeURIComponent(token)
+    )
+  );
+});
+
+// 退订确认：POST /api/subscribe/unsubscribe（表单里的「确认退订」按钮触发）
+app.post("/api/subscribe/unsubscribe", async (c) => {
+  const body = (await c.req.parseBody().catch(() => ({}))) as Record<string, string>;
+  const token = c.req.query("token") || String(body.token || "");
   const cfg = await getSubscribeConfig((c.env as Bindings).DB).catch(
     () => SUBSCRIBE_DEFAULT_CONFIG
   );

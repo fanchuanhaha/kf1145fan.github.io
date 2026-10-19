@@ -4797,7 +4797,7 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
           <li>
             <div>
               <div class="name"><span class="chip">GET</span> /api/subscribe/unsubscribe?token=xxx</div>
-              <div class="meta">退订（邮件里的链接）。返回一个提示页面</div>
+              <div class="meta">退订（邮件里的链接）。先返回确认页，点「确认退订」（POST）后才执行</div>
             </div>
           </li>
           <li>
