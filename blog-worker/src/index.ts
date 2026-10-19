@@ -1916,6 +1916,11 @@ interface SubscribeConfig {
   unsubBody: string;
   // 当日最多订阅量（按东八区计日）：达到上限后当天不再接受新订阅，用于暴力防刷
   dailyLimit: number;
+  // 订阅验证方式：none=无 / cf=Cloudflare Turnstile / builtin=内置图形验证码（SVG 自绘）
+  verify: "none" | "cf" | "builtin";
+  // Turnstile 密钥（verify=cf 时生效）
+  cfSiteKey: string;
+  cfSecretKey: string;
 }
 
 const SUBSCRIBE_DEFAULT_CONFIG: SubscribeConfig = {
@@ -1945,6 +1950,9 @@ const SUBSCRIBE_DEFAULT_CONFIG: SubscribeConfig = {
     "<p>你好！</p><p>你已成功退订 <b>{{site}}</b> 的邮件通知，之后不会再收到新文章邮件。</p>" +
     "<p>如果这不是你本人的操作，可回到站点重新订阅。</p>",
   dailyLimit: 100,
+  verify: "builtin",
+  cfSiteKey: "",
+  cfSecretKey: "",
 };
 
 const subscribeJson = (body: unknown, status = 200) =>
@@ -1980,6 +1988,14 @@ function ensureSubscribeTables(db: D1Database): Promise<unknown> {
         ),
         db.prepare(
           `CREATE TABLE IF NOT EXISTS "wl_Settings" ("key" TEXT PRIMARY KEY, "value" TEXT NOT NULL DEFAULT '', "updatedAt" TEXT DEFAULT (datetime('now')))`
+        ),
+        // 内置图形验证码：只存哈希，一次性校验（参考 dnsmgr/think-captcha 的一次性哈希思路）
+        db.prepare(
+          `CREATE TABLE IF NOT EXISTS "wl_Captcha" (
+            "id" TEXT PRIMARY KEY,
+            "hash" TEXT NOT NULL,
+            "createdAt" TEXT DEFAULT (datetime('now'))
+          )`
         ),
       ])
       .catch((e) => {
@@ -2020,6 +2036,200 @@ function randomToken(bytes = 24): string {
   return Array.from(a)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+// ---------- 内置图形验证码（参考 dnsmgr/think-captcha：4 位、去混淆字符集、干扰曲线/杂点、哈希存储、一次性校验）----------
+// Worker 里没有 GD，用 SVG 自绘实现等价效果
+const CAPTCHA_CODE_SET = "2345678abcdefhijkmnpqrstuvwxyzABCDEFGHJKLMNPQRTUVWXY";
+const CAPTCHA_EXPIRE_SECONDS = 600;
+
+async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function randomCaptchaCode(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  let out = "";
+  for (const b of bytes) out += CAPTCHA_CODE_SET[b % CAPTCHA_CODE_SET.length];
+  return out;
+}
+
+function captchaSvg(code: string): string {
+  const W = 132;
+  const H = 46;
+  const parts: string[] = [];
+  parts.push('<rect width="' + W + '" height="' + H + '" fill="rgb(243,251,254)"/>');
+  // 干扰曲线（正弦抖动）
+  for (let i = 0; i < 3; i++) {
+    const y = 8 + Math.random() * (H - 16);
+    const color = "hsl(" + Math.floor(Math.random() * 360) + ",60%,72%)";
+    let d = "M0," + y.toFixed(1);
+    for (let x = 12; x <= W; x += 12) {
+      d +=
+        " Q" + (x - 6) + "," + (y + (Math.random() - 0.5) * 12).toFixed(1) +
+        " " + x + "," + (y + (Math.random() - 0.5) * 12).toFixed(1);
+    }
+    parts.push('<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.2"/>');
+  }
+  // 杂点
+  for (let i = 0; i < 32; i++) {
+    parts.push(
+      '<circle cx="' + (Math.random() * W).toFixed(1) +
+      '" cy="' + (Math.random() * H).toFixed(1) +
+      '" r="' + (0.8 + Math.random() * 1.4).toFixed(1) +
+      '" fill="hsl(' + Math.floor(Math.random() * 360) + ',50%,68%)"/>'
+    );
+  }
+  // 字符：随机旋转 -40~40 度（与 dnsmgr 一致），深色保证可读
+  const colors = ["#2b4c7e", "#7c3a1d", "#1f6b3b", "#5b2c6f", "#8a1c1c"];
+  for (let i = 0; i < code.length; i++) {
+    const x = 18 + i * 28 + (Math.random() - 0.5) * 8;
+    const y = H - 12 + (Math.random() - 0.5) * 8;
+    const angle = -40 + Math.random() * 80;
+    parts.push(
+      '<text x="' + x.toFixed(1) + '" y="' + y.toFixed(1) +
+      '" transform="rotate(' + angle.toFixed(1) + " " + x.toFixed(1) + " " + y.toFixed(1) + ')"' +
+      ' font-family="Georgia,\'Times New Roman\',serif" font-size="28" font-weight="bold" fill="' +
+      colors[i % colors.length] + '">' + code[i] + "</text>"
+    );
+  }
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '">' + parts.join("") + "</svg>";
+}
+
+// 生成验证码：哈希存库（明文只出现在图里），返回 id + data URI 图片
+async function newCaptcha(db: D1Database): Promise<{ id: string; image: string }> {
+  await ensureSubscribeTables(db);
+  const id = randomToken(12);
+  const code = randomCaptchaCode();
+  const hash = await sha256Hex(id + ":" + code.toLowerCase());
+  // 顺手清理过期验证码
+  await db
+    .prepare(`DELETE FROM "wl_Captcha" WHERE "createdAt" < datetime('now','-' || ?1 || ' seconds')`)
+    .bind(CAPTCHA_EXPIRE_SECONDS)
+    .run()
+    .catch(() => {});
+  await db.prepare(`INSERT INTO "wl_Captcha" ("id","hash") VALUES (?1,?2)`).bind(id, hash).run();
+  return { id, image: "data:image/svg+xml," + encodeURIComponent(captchaSvg(code)) };
+}
+
+// 校验验证码（一次性：无论成败都销毁，失败后前端重新取图，防同 id 暴力枚举）
+async function checkCaptcha(db: D1Database, id: string, code: string): Promise<boolean> {
+  if (!id || !code) return false;
+  try {
+    await ensureSubscribeTables(db);
+    const row = await db
+      .prepare(`SELECT "hash" FROM "wl_Captcha" WHERE "id"=?1`)
+      .bind(id)
+      .first<{ hash: string }>();
+    await db.prepare(`DELETE FROM "wl_Captcha" WHERE "id"=?1`).bind(id).run();
+    if (!row) return false;
+    const hash = await sha256Hex(id + ":" + code.trim().toLowerCase());
+    return row.hash === hash;
+  } catch (e) {
+    console.error("check captcha failed", e);
+    return false;
+  }
+}
+
+// Cloudflare Turnstile 服务端校验：POST siteverify（token 一次性、5 分钟有效）
+async function verifyTurnstile(secret: string, token: string, ip: string): Promise<boolean> {
+  if (!secret || !token) return false;
+  try {
+    const fd = new URLSearchParams({ secret, response: token });
+    if (ip) fd.set("remoteip", ip);
+    const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: fd.toString(),
+    });
+    const d = (await r.json()) as { success?: boolean };
+    return !!d.success;
+  } catch (e) {
+    console.error("turnstile verify failed", e);
+    return false;
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) =>
+    ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : ch === ">" ? "&gt;" : ch === '"' ? "&quot;" : "&#39;"
+  );
+}
+
+// 独立订阅页（不依赖主题）：/subscribe?email=xxx
+// 验证区随订阅设置变化：无 / Cloudflare Turnstile / 内置图形验证码
+function subscribePageHtml(cfg: SubscribeConfig, prefillEmail: string): string {
+  const site = escapeHtml(cfg.siteName || "本站");
+  const email = escapeHtml(prefillEmail);
+  const back = cfg.siteUrl
+    ? '<p class="foot"><a href="' + escapeHtml(cfg.siteUrl) + '">返回站点</a></p>'
+    : "";
+  let verifyHtml = "";
+  let verifyJs = "";
+  if (cfg.verify === "cf" && cfg.cfSiteKey) {
+    verifyHtml =
+      '<div class="cf-turnstile" data-sitekey="' + escapeHtml(cfg.cfSiteKey) + '" style="margin:12px 0"></div>' +
+      '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer><\/script>';
+    verifyJs =
+      'var tk=document.querySelector(\'[name="cf-turnstile-response"]\');body.cfToken=tk?tk.value:"";';
+  } else if (cfg.verify === "builtin") {
+    verifyHtml =
+      '<div class="cap"><input type="text" id="cap" placeholder="验证码" autocomplete="off">' +
+      '<img id="capImg" height="40" alt="验证码" title="点击更换验证码" style="cursor:pointer"></div>';
+    verifyJs =
+      'body.captchaId=window.__cid||"";body.captchaCode=(document.getElementById("cap")||{}).value||"";';
+  }
+  return (
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 - ' + site + "</title>" +
+    "<style>" +
+    'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+    "font:14px/1.7 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',Arial,sans-serif;" +
+    'background:#f7f7f8;color:#1f2328}' +
+    '.card{max-width:420px;width:calc(100% - 32px);padding:28px;background:#fff;border:1px solid #e3e3e4;border-radius:6px}' +
+    'h1{margin:0 0 8px;font-size:18px}.desc{margin:0 0 16px;color:#6b7280}' +
+    'input{width:100%;padding:9px 12px;border:1px solid #d0d7de;border-radius:4px;font-size:14px;' +
+    'background:#fff;color:#1f2328;box-sizing:border-box}input:focus{outline:none;border-color:#f97316}' +
+    'button{margin-top:14px;width:100%;padding:10px;border:0;border-radius:4px;background:#f97316;color:#fff;font-size:14px;cursor:pointer}' +
+    'button:hover{background:#ea580c}button[disabled]{opacity:.6;cursor:not-allowed}' +
+    '.cap{display:flex;gap:8px;margin-top:12px;align-items:center}.cap input{flex:1}' +
+    '.cap img{height:40px;border:1px solid #d0d7de;border-radius:4px;background:#fff}' +
+    '.msg{margin:12px 0 0;min-height:20px;color:#6b7280}.msg.ok{color:#1a7f37}.msg.err{color:#dc2626}' +
+    '.foot{margin:16px 0 0;text-align:center}.foot a{color:#f97316;text-decoration:none}' +
+    "@media(prefers-color-scheme:dark){body{background:#0f1115;color:#e8e8e8}" +
+    ".card{background:#181b20;border-color:#2b2f36}.desc,.msg{color:#9ca3af}" +
+    "input{background:#14161a;border-color:#2b2f36;color:#e8e8e8}.cap img{background:#fff}}" +
+    "</style></head><body>" +
+    '<div class="card"><h1>订阅「' + site + '」</h1>' +
+    '<p class="desc">输入邮箱，新文章发布时第一时间收到邮件通知。</p>' +
+    '<form id="f"><input type="email" id="email" placeholder="you@example.com" value="' + email + '" required>' +
+    verifyHtml +
+    '<button type="submit" id="btn">订阅</button></form>' +
+    '<p class="msg" id="msg"></p>' + back + "</div>" +
+    "<script>(function(){" +
+    "var f=document.getElementById('f'),msg=document.getElementById('msg'),btn=document.getElementById('btn');" +
+    (cfg.verify === "builtin"
+      ? "window.__cid='';function refreshCaptcha(){fetch('/api/captcha/new').then(function(r){return r.json();}).then(function(d){" +
+        "if(d&&d.ok){window.__cid=d.id;var im=document.getElementById('capImg');if(im)im.src=d.image;}}).catch(function(){});}" +
+        "document.getElementById('capImg').addEventListener('click',function(){refreshCaptcha();var ci=document.getElementById('cap');if(ci)ci.value='';});" +
+        "refreshCaptcha();"
+      : "") +
+    "f.addEventListener('submit',function(e){e.preventDefault();" +
+    "var email=(document.getElementById('email')||{}).value||'';email=email.trim();if(!email)return;" +
+    "btn.disabled=true;msg.className='msg';msg.textContent='提交中…';" +
+    "var body={email:email};" + verifyJs +
+    "fetch('/api/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})" +
+    ".then(function(r){return r.json().catch(function(){return {};});}).then(function(d){btn.disabled=false;" +
+    "if(d&&d.ok){msg.className='msg ok';msg.textContent=d.message||'订阅成功';f.style.display='none';}" +
+    "else{msg.className='msg err';msg.textContent=(d&&d.error)||'订阅失败，请稍后重试';" +
+    (cfg.verify === "builtin" ? "refreshCaptcha();" : "") +
+    (cfg.verify === "cf" ? "if(window.turnstile&&window.turnstile.reset)window.turnstile.reset();" : "") +
+    "}}).catch(function(){btn.disabled=false;msg.className='msg err';msg.textContent='网络异常，请稍后重试';});});" +
+    "})();<\/script></body></html>"
+  );
 }
 
 function renderTemplate(tpl: string, vars: Record<string, string>): string {
@@ -2169,13 +2379,33 @@ app.options("/api/subscribe", (c) => new Response(null, { status: 204, headers: 
 
 app.post("/api/subscribe", async (c) => {
   const db = (c.env as Bindings).DB;
-  const body = (await c.req.json().catch(() => ({}))) as { email?: unknown };
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const email = String(body?.email ?? "").trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return subscribeJson({ ok: false, error: "邮箱格式不正确" }, 400);
   }
   try {
     const cfg = await getSubscribeConfig(db);
+    // 订阅验证（订阅管理 → 订阅设置 可配置：无 / Cloudflare Turnstile / 内置图形验证码）
+    if (cfg.verify === "cf") {
+      const token = String(body?.cfToken || body?.["cf-turnstile-response"] || "");
+      const ip = c.req.header("cf-connecting-ip") || c.req.header("x-forwarded-for") || "";
+      if (!(await verifyTurnstile(cfg.cfSecretKey, token, ip))) {
+        return subscribeJson({ ok: false, error: "请完成人机验证", needVerify: "cf" }, 400);
+      }
+    } else if (cfg.verify === "builtin") {
+      const ok = await checkCaptcha(
+        db,
+        String(body?.captchaId || ""),
+        String(body?.captchaCode || "")
+      );
+      if (!ok) {
+        return subscribeJson(
+          { ok: false, error: "验证码错误或已过期，请重新输入", needVerify: "builtin" },
+          400
+        );
+      }
+    }
     if (!cfg.host || !cfg.port) {
       return subscribeJson({ ok: false, error: "订阅功能尚未配置" }, 503);
     }
@@ -2249,6 +2479,44 @@ app.post("/api/subscribe", async (c) => {
       500
     );
   }
+});
+
+// 订阅验证配置（公开，供自定义表单渲染验证码用）：GET /api/subscribe/verify
+app.get("/api/subscribe/verify", async (c) => {
+  try {
+    const cfg = await getSubscribeConfig((c.env as Bindings).DB);
+    return subscribeJson({
+      ok: true,
+      verify: cfg.verify === "cf" && !cfg.cfSiteKey ? "none" : cfg.verify,
+      cfSiteKey: cfg.cfSiteKey || "",
+    });
+  } catch (e) {
+    return subscribeJson({ ok: true, verify: "none", cfSiteKey: "" });
+  }
+});
+
+// 内置验证码取图（公开，一次性）：GET /api/captcha/new → {id, image(data URI)}
+// 自定义表单接入：取图 → 用户输入 → POST /api/subscribe 带 captchaId + captchaCode
+app.options("/api/captcha/new", (c) => new Response(null, { status: 204, headers: VISIT_CORS }));
+app.get("/api/captcha/new", async (c) => {
+  try {
+    const d = await newCaptcha((c.env as Bindings).DB);
+    return subscribeJson({ ok: true, ...d });
+  } catch (e) {
+    console.error("captcha new failed", e);
+    return subscribeJson({ ok: false, error: "验证码生成失败" }, 500);
+  }
+});
+
+// 独立订阅页（不依赖主题）：/subscribe?email=xxx
+// 主题订阅框提交后跳转到这里完成验证；也可直接分享此链接
+app.get("/subscribe", async (c) => {
+  const cfg = await getSubscribeConfig((c.env as Bindings).DB).catch(
+    () => SUBSCRIBE_DEFAULT_CONFIG
+  );
+  const email = (c.req.query("email") || "").slice(0, 200);
+  c.header("Cache-Control", "no-store, must-revalidate");
+  return c.html(subscribePageHtml(cfg, email));
 });
 
 // 确认订阅：GET /api/subscribe/confirm?token=xxx
@@ -2379,7 +2647,14 @@ app.get("/admin/api/subscribe/settings", async (c) => {
   if (!isAdmin(c.get("userInfo"))) return json({ error: "unauthorized" }, 401);
   try {
     const cfg = await getSubscribeConfig((c.env as Bindings).DB);
-    return json({ ok: true, ...cfg, pass: "", hasPass: !!cfg.pass });
+    return json({
+      ok: true,
+      ...cfg,
+      pass: "",
+      hasPass: !!cfg.pass,
+      cfSecretKey: "",
+      hasCfSecret: !!cfg.cfSecretKey,
+    });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
   }
@@ -2420,9 +2695,24 @@ app.put("/admin/api/subscribe/settings", async (c) => {
       unsubSubject: asStr(body.unsubSubject, cur.unsubSubject),
       unsubBody: asStr(body.unsubBody, cur.unsubBody),
       dailyLimit: asLimit(body.dailyLimit, cur.dailyLimit),
+      verify: (["none", "cf", "builtin"] as const).includes(body.verify as never)
+        ? (body.verify as SubscribeConfig["verify"])
+        : cur.verify,
+      cfSiteKey: asStr(body.cfSiteKey, cur.cfSiteKey).trim(),
+      cfSecretKey:
+        body.cfSecretKey === undefined || body.cfSecretKey === ""
+          ? cur.cfSecretKey
+          : String(body.cfSecretKey),
     };
     await saveSubscribeConfig(db, next);
-    return json({ ok: true, ...next, pass: "", hasPass: !!next.pass });
+    return json({
+      ok: true,
+      ...next,
+      pass: "",
+      hasPass: !!next.pass,
+      cfSecretKey: "",
+      hasCfSecret: !!next.cfSecretKey,
+    });
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);
   }

@@ -2439,8 +2439,23 @@ async function loadSubscribeSettings(){
       const ck = $('#smNeedConfirm'); if(ck) ck.checked = !!d.needConfirm;
       subSet('smDailyLimit', d.dailyLimit);
       subSet('subDailyLimit', d.dailyLimit);
+      subSet('smVerify', d.verify || 'none');
+      subSet('smCfSiteKey', d.cfSiteKey);
+      const sk = $('#smCfSecretKey');
+      if(sk){ sk.value=''; sk.placeholder = d.hasCfSecret ? '已保存（留空表示不修改）' : '未设置'; }
+      toggleCfFields();
+      const pu = $('#subPageUrl'); if(pu) pu.value = location.origin + '/subscribe';
     }
   }catch(e){}
+}
+function toggleCfFields(){
+  const sel = $('#smVerify'), box = $('#smCfBox');
+  if(sel && box) box.style.display = sel.value === 'cf' ? '' : 'none';
+}
+async function copySubPageUrl(){
+  const el = $('#subPageUrl'); if(!el || !el.value) return;
+  try{ await navigator.clipboard.writeText(el.value); toast('订阅页面链接已复制'); }
+  catch(e){ el.select(); toast('请手动复制', true); }
 }
 async function loadSubscribe(){
   await loadSubscribeSettings();
@@ -2456,7 +2471,9 @@ async function saveSubscribeSettings(){
     subject: v('smSubject'), body: v('smBody'), needConfirm: !!(ck && ck.checked),
     notifySubject: v('smNotifySubject'), notifyBody: v('smNotifyBody'),
     unsubSubject: v('smUnsubSubject'), unsubBody: v('smUnsubBody'),
-    dailyLimit: v('smDailyLimit')
+    dailyLimit: v('smDailyLimit'),
+    verify: v('smVerify') || 'none',
+    cfSiteKey: v('smCfSiteKey').trim(), cfSecretKey: v('smCfSecretKey')
   };
   const r = await api('/admin/api/subscribe/settings', { method:'PUT', body: JSON.stringify(payload) });
   const msg = $('#smtpMsg') || $('#subMsg');
@@ -2464,6 +2481,7 @@ async function saveSubscribeSettings(){
     toast('配置已保存');
     if(msg){ msg.className='msg ok'; msg.textContent='配置已保存'; }
     const p = $('#smPass'); if(p) p.value='';
+    const sk = $('#smCfSecretKey'); if(sk) sk.value='';
     loadSubscribe();
   } else {
     const err = (r.data && r.data.error) || '保存失败';
@@ -4418,6 +4436,22 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
     </div>
 
     <div class="wk-card">
+      <h3 class="wk-title">订阅入口（多种接入方式）</h3>
+      <p class="wk-label" style="margin-top:0">订阅页面由后台直接提供、不依赖主题，可分享链接或嵌入任意网站；自定义表单可调接口自行接入。</p>
+      <div class="filters" style="margin:0 0 10px;align-items:center">
+        <span class="wk-label" style="margin:0">订阅页面</span>
+        <input class="wk-input" id="subPageUrl" style="flex:1;min-width:180px" readonly>
+        <button class="wk-btn ghost sm" onclick="copySubPageUrl()">复制</button>
+        <button class="wk-btn ghost sm" onclick="window.open($('#subPageUrl').value,'_blank')">打开</button>
+      </div>
+      <ul class="wk-label" style="margin:0;padding-left:18px;line-height:1.9">
+        <li>主题订阅框：当前主题文章页的「订阅博客」提交后自动跳转订阅页面（带邮箱参数）</li>
+        <li>接口订阅：<b>POST /api/subscribe</b>（body 传 email，以及验证方式对应的 captchaId/captchaCode 或 cfToken）</li>
+        <li>验证配置查询：<b>GET /api/subscribe/verify</b>；内置验证码取图：<b>GET /api/captcha/new</b>（返回一次性 id + 图片）</li>
+      </ul>
+    </div>
+
+    <div class="wk-card">
       <h3 class="wk-title">订阅限制（防刷）</h3>
       <p class="wk-label" style="margin-top:0">按东八区计日，当天新订阅达到上限后，其他人将无法再提交订阅。</p>
       <div class="filters" style="margin:0 0 10px;align-items:center">
@@ -4473,6 +4507,27 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
         <span class="wk-label" style="margin:0">当日最多订阅量</span>
         <input class="wk-input" id="smDailyLimit" type="number" min="1" max="1000000" style="width:130px" placeholder="100">
         <span class="wk-label" style="margin:0">（按东八区计日，达到后当天不再接受新订阅，防刷）</span>
+      </div>
+      <label class="wk-label" style="margin-top:14px">订阅验证（提交订阅前的人机验证）</label>
+      <div class="filters" style="margin:0 0 10px;align-items:center">
+        <select class="wk-input" id="smVerify" style="width:220px" onchange="toggleCfFields()">
+          <option value="none">无（不验证）</option>
+          <option value="cf">Cloudflare Turnstile</option>
+          <option value="builtin">内置图形验证码</option>
+        </select>
+        <span class="wk-label" style="margin:0">内置验证码开箱即用；Turnstile 需到 Cloudflare 控制台创建站点获取密钥</span>
+      </div>
+      <div id="smCfBox" style="display:none">
+        <div class="wk-row">
+          <div style="flex:1">
+            <label class="wk-label">Turnstile Site Key（公开）</label>
+            <input class="wk-input" id="smCfSiteKey" placeholder="0x4AAAAA...">
+          </div>
+          <div style="flex:1">
+            <label class="wk-label">Turnstile Secret Key</label>
+            <input class="wk-input" id="smCfSecretKey" type="password" placeholder="">
+          </div>
+        </div>
       </div>
       <div class="filters" style="margin:14px 0 0">
         <button class="wk-btn sm" onclick="saveSubscribeSettings()">保存配置</button>
@@ -4798,6 +4853,24 @@ export function renderAdminPage(siteUrl: string, ghRepo?: string, initial = "man
             <div>
               <div class="name"><span class="chip">GET</span> /api/subscribe/unsubscribe?token=xxx</div>
               <div class="meta">退订（邮件里的链接）。先返回确认页，点「确认退订」（POST）后才执行</div>
+            </div>
+          </li>
+          <li>
+            <div>
+              <div class="name"><span class="chip">GET</span> /subscribe?email=xxx</div>
+              <div class="meta">独立订阅页面（不依赖主题，可分享/嵌入）。按订阅设置显示对应验证方式</div>
+            </div>
+          </li>
+          <li>
+            <div>
+              <div class="name"><span class="chip">GET</span> /api/subscribe/verify</div>
+              <div class="meta">查询订阅验证方式（none/cf/builtin）与 Turnstile Site Key，供自定义表单渲染</div>
+            </div>
+          </li>
+          <li>
+            <div>
+              <div class="name"><span class="chip">GET</span> /api/captcha/new</div>
+              <div class="meta">内置验证码取图：返回一次性 id + data URI 图片；校验随 /api/subscribe 提交 captchaId + captchaCode</div>
             </div>
           </li>
           <li>
